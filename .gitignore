@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.mp4
+*.png
+
+# test media / scratch
+scripts/*.jpg
