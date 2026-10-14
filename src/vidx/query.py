@@ -406,6 +406,8 @@ def _peek_source(target: str) -> tuple[str, str | None, float]:
             raise VidxError(f"{t} has no render yet (call render('{t}') first)")
         return p, None, float(ver["timeline"].get("out_duration") or 0)
     v = store.get_video(t)
+    if not os.path.exists(v.path):
+        raise VidxError(f"source file missing: {v.path} (re-run index_video on its new path; text tools still work)")
     return v.path, v.id, v.duration
 
 

@@ -26,6 +26,17 @@ def _usage(fn):
                 out = locals().get("res")
                 chars = len(out) if isinstance(out, str) else len(out[1]) if isinstance(out, tuple) else 0
                 imgs = len(out[0]) if isinstance(out, tuple) else 0
+                img_tok = 0
+                if imgs:  # Claude image cost ~ w*h/750 after resize to <=1568px / ~1.15MP
+                    import io as _io
+                    import math as _m
+
+                    from PIL import Image as _I
+
+                    for b in out[0]:
+                        w, h = _I.open(_io.BytesIO(b)).size
+                        sc = min(1.0, 1568 / max(w, h), _m.sqrt(1_150_000 / (w * h)))
+                        img_tok += _m.ceil(w * sc * h * sc / 750)
                 vid = str(kw.get("video_id") or (a[0] if a else ""))
                 if vid[:1] in "vV" and vid[1:].isdigit():  # version -> its video, so reports group per video
                     try:
@@ -33,7 +44,7 @@ def _usage(fn):
                     except Exception:
                         pass
                 rec = {"t": round(time.time(), 1), "tool": fn.__name__, "target": vid[:40], "chars": chars,
-                       "images": imgs, "ok": ok, "secs": round(time.perf_counter() - t0, 2)}
+                       "images": imgs, "image_tokens": img_tok, "ok": ok, "secs": round(time.perf_counter() - t0, 2)}
                 config.HOME.mkdir(parents=True, exist_ok=True)
                 with open(config.HOME / "usage.log", "a") as f:
                     f.write(json.dumps(rec) + "\n")

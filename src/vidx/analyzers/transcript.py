@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import re
 
+import numpy as np
+
 from .. import config, store, util
 from ..store import VideoInfo, Word
 from . import AnalyzerResult, Context
@@ -77,6 +79,29 @@ def choose_task(lang: str | None, model: str) -> str:
     return "transcribe"
 
 
+CHUNK_S = 300.0   # target chunk length
+SEARCH_S = 30.0   # look this far back from the target for the quietest moment to cut at
+
+
+def chunk_bounds(reader: "util.WavReader", size: float = CHUNK_S, search: float = SEARCH_S) -> list[tuple[float, float]]:
+    """Split the file into ~size-second chunks, each cut at the quietest 0.5s near the boundary
+    so a word is never split between two whisper calls."""
+    D = reader.duration
+    out, start = [], 0.0
+    while D - start > size + search:
+        lo, hi = start + size - search, start + size
+        x = reader.seconds(lo, hi)
+        hop = int(reader.sr * 0.1)
+        n = len(x) // hop
+        rms = np.sqrt((x[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(1) + 1e-12)
+        smooth = np.convolve(rms, np.ones(5) / 5, mode="same")  # 0.5s windows
+        cut = lo + (int(np.argmin(smooth)) + 0.5) * 0.1
+        out.append((start, cut))
+        start = cut
+    out.append((start, D))
+    return out
+
+
 class Transcript:
     name = "transcript"
     optional = False
@@ -86,35 +111,42 @@ class Transcript:
         if wav is None:
             store.put_words(video.id, [])
             return AnalyzerResult(info={"language": None, "words": 0}, skipped="no audio stream")
-        audio, sr = util.read_wav(wav)
+        reader = util.WavReader(wav)
         model = load_whisper(config.WHISPER_MODEL)
         lang = config.WHISPER_LANGUAGE
         prob = None
         if lang is None:
-            # detect on up to 3 voiced windows spread through the file, not just the first 30s
-            lang, prob, _ = model.detect_language(audio, vad_filter=True, language_detection_segments=3)
+            # detect on voiced windows spread through the file (not just the first 30s), using
+            # three 60s samples so memory stays small on long files
+            D = reader.duration
+            probe = np.concatenate([reader.seconds(t, t + 60) for t in (D * 0.1, D * 0.5, D * 0.85)])
+            lang, prob, _ = model.detect_language(probe, vad_filter=True, language_detection_segments=3)
         task = choose_task(lang, config.WHISPER_MODEL)
-        segments, info = model.transcribe(
-            audio, language=lang, task=task, word_timestamps=True, vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500}, beam_size=1, temperature=[0.0],
-            condition_on_previous_text=False,
-        )
         words: list[Word] = []
-        dropped = kept = 0.0
+        dropped = 0.0
         scripts: dict[str, float] = {}
-        for seg in segments:
-            d = seg.end - seg.start
-            if degenerate(seg.text, seg.compression_ratio, lang, task):
-                dropped += d
-                continue
-            kept += d
-            for w in seg.words or []:
-                text = w.word.strip()
-                if text:
-                    words.append(Word(round(w.start, 3), round(max(w.end, w.start + 0.01), 3), text))
-                    sc = script_of(text)
-                    if sc:
-                        scripts[sc] = scripts.get(sc, 0) + (w.end - w.start)
+        # Transcribe in ~5 min chunks cut at quiet moments. faster-whisper builds the spectrogram of
+        # whatever it is given in one go: a whole hour peaked at several GB on an 8 GB machine.
+        for c0, c1 in chunk_bounds(reader):
+            audio = reader.seconds(c0, c1)
+            segments, _ = model.transcribe(
+                audio, language=lang, task=task, word_timestamps=True, vad_filter=True,
+                vad_parameters={"min_silence_duration_ms": 500}, beam_size=1, temperature=[0.0],
+                condition_on_previous_text=False,
+            )
+            for seg in segments:
+                if degenerate(seg.text, seg.compression_ratio, lang, task):
+                    dropped += seg.end - seg.start
+                    continue
+                for w in seg.words or []:
+                    text = w.word.strip()
+                    if text:
+                        ws, we = c0 + w.start, c0 + max(w.end, w.start + 0.01)
+                        words.append(Word(round(ws, 3), round(we, 3), text))
+                        sc = script_of(text)
+                        if sc:
+                            scripts[sc] = scripts.get(sc, 0) + (we - ws)
+            del audio
         store.put_words(video.id, words)
         tot = sum(scripts.values()) or 1
         mix = {k: round(v / tot, 2) for k, v in scripts.items()} if len(scripts) > 1 else None

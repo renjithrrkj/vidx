@@ -42,10 +42,50 @@ def extract_audio16k(src: str, dst: Path) -> Path:
 
 
 def read_wav(path: Path) -> tuple[np.ndarray, int]:
+    """Whole file in RAM. Only for short clips; long videos use WavReader (an hour of 16 kHz
+    audio is ~230 MB as float32 before any model touches it)."""
     with wave.open(str(path), "rb") as w:
         sr = w.getframerate()
         data = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
     return data.astype(np.float32) / 32768.0, sr
+
+
+class WavReader:
+    """Lazy mono 16-bit wav: `r[a:b]` reads just those samples from disk as float32.
+
+    Lets analyzers walk a multi-hour file with flat memory.
+    """
+
+    def __init__(self, path: Path):
+        self.path = str(path)
+        with wave.open(self.path, "rb") as w:
+            self.sr = w.getframerate()
+            self.n = w.getnframes()
+
+    def __len__(self) -> int:
+        return self.n
+
+    @property
+    def duration(self) -> float:
+        return self.n / self.sr
+
+    def __getitem__(self, sl: slice) -> np.ndarray:
+        a, b, _ = sl.indices(self.n)
+        if b <= a:
+            return np.zeros(0, np.float32)
+        with wave.open(self.path, "rb") as w:
+            w.setpos(a)
+            data = np.frombuffer(w.readframes(b - a), dtype=np.int16)
+        return data.astype(np.float32) / 32768.0
+
+    def seconds(self, t0: float, t1: float) -> np.ndarray:
+        return self[int(t0 * self.sr): int(t1 * self.sr)]
+
+    def chunks(self, size_s: float):
+        """(start_seconds, samples) in fixed-size pieces."""
+        step = int(size_s * self.sr)
+        for a in range(0, self.n, step):
+            yield a / self.sr, self[a: a + step]
 
 
 def rms_db(samples: np.ndarray) -> float:

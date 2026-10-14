@@ -11,17 +11,23 @@ from PIL import Image, ImageDraw, ImageFont
 from .util import mmss
 
 
-def grab_frame(path: str, t: float, long_side: int = 384) -> Image.Image | None:
-    """Single frame at time t (fast input seek), longest side scaled to long_side."""
+def grab_frame(path: str, t: float, long_side: int = 384, retries: int = 3) -> Image.Image | None:
+    """Single frame at time t (fast input seek), longest side scaled to long_side.
+
+    Seeking at/after the last decodable frame returns nothing, so back off 0.5s a few times.
+    Bounded on purpose: a missing or unreadable file must fail fast, not walk back to 0.
+    """
     vf = f"scale='if(gt(iw,ih),{long_side},-2)':'if(gt(iw,ih),-2,{long_side})'"
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(t, 0):.3f}", "-i", path,
-           "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-c:v", "png", "-"]
-    p = subprocess.run(cmd, capture_output=True)
-    if p.returncode != 0 or not p.stdout:
-        if t > 0.5:  # past the last decodable frame: back off a little
-            return grab_frame(path, t - 0.5, long_side)
-        return None
-    return Image.open(io.BytesIO(p.stdout)).convert("RGB")
+    for k in range(retries + 1):
+        tt = max(t - 0.5 * k, 0.0)
+        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{tt:.3f}", "-i", path,
+               "-frames:v", "1", "-vf", vf, "-f", "image2pipe", "-c:v", "png", "-"]
+        p = subprocess.run(cmd, capture_output=True)
+        if p.returncode == 0 and p.stdout:
+            return Image.open(io.BytesIO(p.stdout)).convert("RGB")
+        if tt == 0.0:
+            break
+    return None
 
 
 def grab_frames(path: str, times: list[float], long_side: int = 384, workers: int = 4) -> list[Image.Image | None]:

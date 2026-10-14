@@ -107,8 +107,8 @@ def check(version_id: str) -> str:
         wav = v.dir / "audio16k.wav"
         if not wav.exists():
             util.extract_audio16k(v.path, wav)
-        samples, sr = util.read_wav(wav)
-        pops = audio_pops(segs, samples, sr)
+        reader = util.WavReader(wav)  # reads only the 30 ms around each join
+        pops = audio_pops(segs, reader, reader.sr)
         fix = "`trans xfade 0.08`" if (tl.get("pad") or 0) >= 0.1 else "`pad 0.1` or `trans xfade 0.08`"
         for k, d in pops[:3]:
             issues.append(f"audio_pop at {join_out(k):.1f} ({d:.0f} dB jump) -> {fix}")

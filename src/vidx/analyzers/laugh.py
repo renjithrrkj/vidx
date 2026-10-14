@@ -26,16 +26,24 @@ def _frames(x: np.ndarray, sr: int, hop: float = HOP) -> np.ndarray:
     return x[: m * n].reshape(m, n)
 
 
-def laugh_scores(x: np.ndarray, sr: int, speech_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """-> (window start times, score 0..1)."""
+def frame_features(x: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-10ms-frame RMS and spectral flatness."""
     fr = _frames(x, sr)
-    if len(fr) < 10:
+    if not len(fr):
         return np.zeros(0), np.zeros(0)
     rms = np.sqrt((fr.astype(np.float64) ** 2).mean(1) + 1e-12)
+    spec = np.abs(np.fft.rfft(fr * np.hanning(fr.shape[1]), axis=1)) + 1e-9
+    flat = np.exp(np.log(spec).mean(1)) / spec.mean(1)
+    return rms, flat
+
+
+def window_scores(rms: np.ndarray, flat: np.ndarray, speech_mask: np.ndarray | None = None
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """-> (window start times, score 0..1) from per-frame features."""
+    if len(rms) < 10:
+        return np.zeros(0), np.zeros(0)
     db = 20 * np.log10(rms)
     ref = np.percentile(db, 95)
-    spec = np.abs(np.fft.rfft(fr * np.hanning(fr.shape[1]), axis=1)) + 1e-9
-    flat = np.exp(np.log(spec).mean(1)) / spec.mean(1)  # spectral flatness per 10 ms frame
     wn, st = int(WIN / HOP), int(STEP / HOP)
     times, scores = [], []
     freqs = np.fft.rfftfreq(wn, HOP)
@@ -55,6 +63,11 @@ def laugh_scores(x: np.ndarray, sr: int, speech_mask: np.ndarray | None = None) 
         times.append(i * HOP)
         scores.append(score)
     return np.asarray(times), np.asarray(scores)
+
+
+def laugh_scores(x: np.ndarray, sr: int, speech_mask: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """In-memory convenience wrapper (short clips / tests)."""
+    return window_scores(*frame_features(x, sr), speech_mask)
 
 
 def to_events(times: np.ndarray, scores: np.ndarray, thr: float = 0.35, min_dur: float = 0.7) -> list[Event]:
@@ -85,11 +98,15 @@ class Laugh:
         wav = ctx.audio16k(video)
         if wav is None:
             return AnalyzerResult(skipped="no audio stream")
-        x, sr = util.read_wav(wav)
-        mask = np.zeros(len(x) // int(sr * HOP) + 1)
+        reader = util.WavReader(wav)
+        # stream 60s chunks (a multiple of HOP, so frames line up); keep only per-frame features
+        feats = [frame_features(x, reader.sr) for _, x in reader.chunks(60.0)]
+        rms = np.concatenate([f[0] for f in feats]) if feats else np.zeros(0)
+        flat = np.concatenate([f[1] for f in feats]) if feats else np.zeros(0)
+        mask = np.zeros(len(rms) + 1)
         for w in store.get_words(video.id):
             mask[int(w.start / HOP): int(w.end / HOP) + 1] = 1
-        t, s = laugh_scores(x, sr, mask)
+        t, s = window_scores(rms, flat, mask)
         ev = to_events(t, s)
         store.put_events(video.id, ["laugh"], ev)
         return AnalyzerResult(info={"laugh": len(ev)})

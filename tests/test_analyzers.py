@@ -51,3 +51,26 @@ def test_choose_task(monkeypatch):
     assert choose_task("en", "small") == "transcribe"
     monkeypatch.setenv("VIDX_WHISPER_TASK", "transcribe")
     assert choose_task("ml", "small") == "transcribe"
+
+
+def test_chunk_bounds_cut_in_quiet_gaps(tmp_path):
+    import wave
+
+    from vidx.analyzers.transcript import chunk_bounds
+    from vidx.util import WavReader
+
+    sr = 16000
+    t = np.arange(sr * 22) / sr
+    x = 0.3 * np.sin(2 * np.pi * 220 * t)
+    for a, b in ((4.0, 4.6), (9.2, 9.8)):  # quiet gaps near the 5s / 10s boundaries
+        x[int(a * sr): int(b * sr)] = 0
+    p = tmp_path / "a.wav"
+    with wave.open(str(p), "wb") as w:
+        w.setnchannels(1), w.setsampwidth(2), w.setframerate(sr)
+        w.writeframes((x * 32767).astype(np.int16).tobytes())
+    r = WavReader(p)
+    assert abs(r.duration - 22) < 1e-6 and len(r[0:sr]) == sr
+    b = chunk_bounds(r, size=5, search=2)
+    assert b[0][0] == 0 and b[-1][1] == r.duration
+    assert all(b[i][1] == b[i + 1][0] for i in range(len(b) - 1))  # contiguous
+    assert 4.0 <= b[0][1] <= 4.6 and 9.2 <= b[1][1] <= 9.8
