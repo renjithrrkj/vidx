@@ -1,30 +1,66 @@
 # vidx
 
-Token-efficient video understanding + editing for LLM agents. A video becomes a compact,
-queryable text index (shots, transcript, audio/visual events, CLIP embeddings). An agent can then
-understand it, edit it with a tiny line-based script, render it with ffmpeg, and QA the result.
-**It never reads full frames by default**: pixels reach the agent only through `peek`, as one small
-labeled contact sheet.
+[![tests](https://github.com/renjithrrkj/vidx/actions/workflows/tests.yml/badge.svg)](https://github.com/renjithrrkj/vidx/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Everything runs locally. No paid APIs.
+**Let AI agents edit video without burning tokens on frames.**
 
-## Install
+For an agent to "watch" a 10-minute video at 1 frame per second costs ~67,000 tokens; an hour is ~400,000.
+vidx watches it once, locally, and gives the agent a compact text map instead: shots, transcript,
+silences, laughs, loud moments and text-searchable visuals. The agent reads a ~600-token overview,
+searches what it needs, edits with a few lines of script, renders with ffmpeg and runs automatic QA.
+Pixels reach the agent only when it explicitly asks to look (`peek`).
+
+Runs 100% locally. No paid APIs. Works with any MCP agent (Claude Code, Claude Desktop, …).
+
+| Measured on 3 real videos (8, 10, 60 min) | transcript + frames | vidx |
+|---|---:|---:|
+| Get the gist of the video | 7k–17k tokens | **~650–930** |
+| Find a moment, read it, look at it | 7k–17k | **~1.4k–1.8k** |
+| Cut dead air, render, QA | 3k–8k | **~0.8k–1k** |
+| Overview of a 10-min vs 60-min video | grows with length | **507 vs 564** |
+
+6–18× fewer tokens in these tests, and the gap widens with longer video. Details, method and the
+cases where it does *not* win: [TOKEN_REPORT.md](TOKEN_REPORT.md).
+
+## Quickstart (Claude Code)
+
+You need [ffmpeg](https://ffmpeg.org) and [uv](https://docs.astral.sh/uv/):
 
 ```bash
-brew install ffmpeg            # or apt install ffmpeg
-cd vidx && uv sync             # Python 3.12, torch, faster-whisper, open_clip, scenedetect, mcp
+brew install ffmpeg uv          # Linux: apt install ffmpeg, then curl -LsSf https://astral.sh/uv/install.sh | sh
+claude mcp add vidx -- uvx --from git+https://github.com/renjithrrkj/vidx vidx-mcp
 ```
 
-The first index downloads Whisper `small` (~460 MB) and CLIP ViT-B-32 (~600 MB) into the HF cache.
+No clone needed. Then ask your agent something like *"index ~/Movies/talk.mp4, cut the dead air
+and make a 9:16 reel of the part where I talk about pricing"*.
 
-## Use from Claude Code (MCP)
+The first index downloads Whisper `small` (~460 MB) and CLIP ViT-B-32 (~600 MB). Indexing takes
+CPU time, not tokens: about 10 min per hour of video on an M1, under ~1 GB of RAM.
+
+**Claude Desktop / other MCP clients:** add to your MCP config (desktop apps don't inherit your shell
+PATH, so give full paths):
+
+```json
+"mcpServers": {
+  "vidx": {
+    "command": "/full/path/to/uvx",
+    "args": ["--from", "git+https://github.com/renjithrrkj/vidx", "vidx-mcp"],
+    "env": { "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
+  }
+}
+```
+
+**From source (to hack on it):**
 
 ```bash
-claude mcp add vidx -- uv run --directory /path/to/vidx vidx-mcp
+git clone https://github.com/renjithrrkj/vidx && cd vidx && uv sync
+claude mcp add vidx -- uv run --directory "$PWD" vidx-mcp
 ```
 
-Then just ask, e.g. *"index ~/Movies/talk.mp4, cut the dead air and make a 9:16 reel of the
-part where I talk about pricing"*. The tools:
+Tested on macOS (Apple silicon). Linux should work (CPU/CUDA); Windows is untested.
+
+## The tools
 
 | Tool | What it returns |
 |---|---|
@@ -127,3 +163,7 @@ uv run pytest                 # + end-to-end on a generated testsrc clip
 ```
 
 See `DECISIONS.md` for the choices made along the way.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -3,6 +3,8 @@ name = "vidx"
 version = "0.1.0"
 description = "Token-efficient video understanding + editing for LLM agents"
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Renjith Kartha" }]
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",

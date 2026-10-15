@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    # DSL, segment math, snap/pad, diff, checks and analyzer logic: no video, no models.
+    # Runs with numpy + pillow only, so CI doesn't download PyTorch on every push.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Unit tests
+        env:
+          PYTHONPATH: src
+        run: uv run --no-project --python ${{ matrix.python }} --with numpy --with pillow --with pytest pytest -q -m "not slow"
