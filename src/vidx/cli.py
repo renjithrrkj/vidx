@@ -26,9 +26,53 @@ def _log(m: str) -> None:
 
 
 @app.command()
-def index(path: str, force: bool = False, captions: bool = False):
+def index(path: str, force: bool = False, captions: bool = False, glitch: bool = False):
     """Index a video (shots, transcript, events, embeddings)."""
-    _out(api.index_video, path, force=force, captions=captions, log=_log)
+    _out(api.index_video, path, force=force, captions=captions, glitch=glitch, log=_log)
+
+
+@app.command()
+def setup():
+    """Download every model once; after this vidx never needs the network."""
+    from .models import prefetch
+
+    prefetch(_log)
+
+
+@app.command()
+def teach(name: str, pos: str = typer.Option(..., help="id:12-14,id:30-31"), neg: str = typer.Option(..., help="id:50-60,...")):
+    """Train a detector from labelled time ranges."""
+    from .detect import teach as _t
+
+    _out(_t, name, pos, neg)
+
+
+@app.command("detect")
+def detect_(name: str, video_id: str, threshold: float = 0.5):
+    """Run a trained detector on a video."""
+    from .detect import detect as _d
+
+    def go():
+        ev = _d(name, video_id, threshold)
+        return "\n".join([f"{len(ev)} {name} ranges"] + [f"{e.start:.0f}-{e.end:.0f} ({e.value:.2f})" for e in ev[:20]])
+
+    _out(go)
+
+
+@app.command("cuts")
+def cuts_():
+    """List the cut library and style packs."""
+    from .cuts import describe
+
+    typer.echo(describe())
+
+
+@app.command()
+def sfx():
+    """List the bundled sounds."""
+    from .timeline import sfx_names
+
+    typer.echo(" ".join(sfx_names()))
 
 
 @app.command("list")
@@ -79,15 +123,18 @@ def peek(target: str, times: Optional[str] = typer.Argument(None, help="comma li
 def edit(video_id: str, script: str = typer.Argument(..., help="DSL text, or @file.vdsl"),
          parent: Optional[str] = None):
     """Create a version from an edit script."""
-    if script.startswith("@"):
+    if script.startswith("@") and not script.endswith(".json"):
         script = Path(script[1:]).read_text()
+    if script.lstrip().startswith(("{", "@")):  # JSON timeline text or file: leave it alone
+        _out(api.edit, video_id, script, parent)
+        return
     _out(api.edit, video_id, script.replace("\\n", "\n").replace(";", "\n"), parent)
 
 
 @app.command()
-def render(version_id: str, preset: str = "original", out: Optional[str] = None):
-    """Render a version with ffmpeg."""
-    _out(api.render, version_id, preset, out)
+def render(version_id: str, preset: str = "original", out: Optional[str] = None, preview: bool = False):
+    """Render a version (--preview = fast 480p draft)."""
+    _out(api.render, version_id, preset, out, preview)
 
 
 @app.command()

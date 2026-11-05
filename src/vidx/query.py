@@ -125,7 +125,9 @@ def overview(video_id: str, level: str = "scenes", limit: int = config.DEFAULT_L
     v = store.get_video(video_id)
     shots = store.get_shots(video_id)
     words = store.get_words(video_id)
-    events = [e for e in store.get_events(video_id) if not (e.kind == "silence" and e.end - e.start < 1.0)]
+    quiet = ("speech", "sfx", "beat")  # constant background facts: use query or get_segment for those
+    events = [e for e in store.get_events(video_id)
+              if e.kind not in quiet and not (e.kind == "silence" and e.end - e.start < 1.0)]
     limit = max(1, int(limit))
 
     def speech(a: float, b: float, n: int = config.SNIPPET_CHARS) -> str:
@@ -171,7 +173,7 @@ def overview(video_id: str, level: str = "scenes", limit: int = config.DEFAULT_L
 
 # ---------------------------------------------------------------- query
 
-EVENT_RE = re.compile(r"^\s*(silence|loud|black|freeze|laugh|beat|ocr)\s*(?:([<>]=?)\s*([\d.]+)\s*s?)?\s*$", re.I)
+EVENT_RE = re.compile(r"^\s*(silence|loud|black|freeze|laugh|beat|glitch|speech|music|sfx)\s*(?:([<>]=?)\s*([\d.]+)\s*s?)?\s*$", re.I)
 
 
 def _norm(s: str) -> str:
@@ -235,9 +237,15 @@ def _context(words: list[Word], a: int, b: int, n: int = config.SNIPPET_CHARS) -
 
 def parse_event_query(text: str) -> tuple[str, str | None, float | None] | None:
     m = EVENT_RE.match(text)
-    if not m:
-        return None
-    return m.group(1).lower(), m.group(2), float(m.group(3)) if m.group(3) else None
+    if m:
+        return m.group(1).lower(), m.group(2), float(m.group(3)) if m.group(3) else None
+    m = re.fullmatch(r"\s*([a-z][a-z0-9_]*)\s*(?:([<>]=?)\s*([\d.]+)\s*s?)?\s*", text)  # a trained detector
+    if m:
+        from . import detect
+
+        if m.group(1) in detect.names():
+            return m.group(1), m.group(2), float(m.group(3)) if m.group(3) else None
+    return None
 
 
 def event_filter(evs: list[Event], op: str | None, val: float | None) -> list[Event]:
@@ -250,13 +258,17 @@ def event_filter(evs: list[Event], op: str | None, val: float | None) -> list[Ev
 def query(video_id: str, text: str, kind: str = "any", limit: int = 10) -> str:
     v = store.get_video(video_id)
     limit = max(1, int(limit))
-    if kind not in ("any", "visual", "speech", "event"):
-        raise VidxError(f"unknown kind {kind!r} (use any|visual|speech|event)")
+    if kind not in ("any", "visual", "speech", "event", "text"):
+        raise VidxError(f"unknown kind {kind!r} (use any|visual|speech|event|text)")
     ev_q = parse_event_query(text)
     if kind == "event" or (kind == "any" and ev_q):
         if not ev_q:
             raise VidxError(f"bad event query {text!r} (try silence>1.5, black, loud, freeze)")
         k, op, val = ev_q
+        from . import detect
+
+        if k in detect.names():  # run a trained detector on this video the first time it's asked
+            detect.detect(k, video_id)
         evs = event_filter(store.get_events(video_id, k), op, val)
         tot = sum(e.end - e.start for e in evs)
         lines = [f"{len(evs)} {k} events" + (f" {op}{val:g}s" if op else "") + f", {tot:.1f}s total"]
@@ -267,6 +279,15 @@ def query(video_id: str, text: str, kind: str = "any", limit: int = 10) -> str:
         return "\n".join(lines)
 
     out: list[str] = []
+    if kind in ("any", "text"):
+        q = _norm(text).strip()
+        hits = [o for o in store.get_overlays(video_id) if o["text"] and q in _norm(o["text"])]
+        if hits or kind == "text":
+            out.append(f"on-screen text: {len(hits)} match{'es' if len(hits) != 1 else ''}")
+            for o in hits[:limit]:
+                out.append(f"  {rng(o['start'], o['end'])} {o['kind']} at x{o['x']:.2f} y{o['y']:.2f}"
+                           f' "{snip(o["text"], config.SNIPPET_CHARS)}"')
+            out += ["  " + x for x in more(len(hits), min(limit, len(hits)))]
     if kind in ("any", "speech"):
         words = store.get_words(video_id)
         hits = speech_hits(words, text)
@@ -353,12 +374,30 @@ def resolve_range(video_id: str, start, end) -> tuple[float, float]:
     return max(0.0, a), min(b, v.duration)
 
 
+def shot_detail_line(s: Shot) -> str:
+    d = s.detail or {}
+    m, c, au, g = d.get("motion") or {}, d.get("color") or {}, d.get("audio") or {}, d.get("glitch")
+    bits = [f"s{s.idx}"]
+    if m:
+        bits.append(f"motion avg {m.get('mean', 0):.1f} peak {m.get('peak', 0):.1f}@{m.get('peak_t', 0):.1f} "
+                    f"curve {' '.join(f'{x:.0f}' for x in m.get('curve', []))}")
+    if c:
+        bits.append(f"luma {c.get('luma')} contrast {c.get('contrast')} sat {c.get('sat')} lab {c.get('lab')}")
+    if au:
+        bits.append(f"audio {au.get('db')} dB")
+    if d.get("keyframes"):
+        bits.append("keyframes " + " ".join(f"{t:.1f}" for t in d["keyframes"]))
+    if g:
+        bits.append(f"GLITCH suspect from {g['start']:.2f} (score {g['score']:.0f}), last clean {g['last_clean']:.2f}")
+    return " | ".join(bits)
+
+
 def get_segment(video_id: str, start, end=None, fields: str = "words,events,shots") -> str:
     a, b = resolve_range(video_id, start, end)
     want = {f.strip() for f in fields.split(",") if f.strip()}
-    bad = want - {"words", "events", "shots", "wordtimes"}
+    bad = want - {"words", "events", "shots", "wordtimes", "detail"}
     if bad:
-        raise VidxError(f"unknown fields {','.join(sorted(bad))} (use words,events,shots,wordtimes)")
+        raise VidxError(f"unknown fields {','.join(sorted(bad))} (use words,events,shots,wordtimes,detail)")
     lines = [f"{rng(a, b)} ({b - a:.1f}s)"]
     if "shots" in want:
         ss = [s for s in store.get_shots(video_id) if s.start < b and s.end > a]
@@ -367,8 +406,20 @@ def get_segment(video_id: str, start, end=None, fields: str = "words,events,shot
             lines.append(f"s{s.idx} {rng(s.start, s.end)} ({s.dur:.1f}s) motion {s.motion or 0:.1f}"
                          + (f' "{d}"' if d else ""))
         lines += more(len(ss), min(30, len(ss)))
+    if "detail" in want:
+        ss = [s for s in store.get_shots(video_id) if s.start < b and s.end > a]
+        for s in ss[:12]:
+            lines.append(shot_detail_line(s))
+        lines += more(len(ss), min(12, len(ss)))
+        for o in store.get_overlays(video_id, start=a, end=b)[:12]:
+            lines.append(f"{o['kind']} {rng(o['start'], o['end'])} box x{o['x']:.2f} y{o['y']:.2f} "
+                         f"w{o['w']:.2f} h{o['h']:.2f}" + (f' "{snip(o["text"], 40)}"' if o["text"] else ""))
     if "events" in want:
         evs = store.get_events(video_id, start=a, end=b)
+        beats = [e for e in evs if e.kind == "beat"]
+        evs = [e for e in evs if e.kind != "beat"]
+        if beats:
+            lines.append(f"beats: {len(beats)}, first " + " ".join(f"{e.start:.2f}" for e in beats[:8]))
         if evs:
             lines.append("events: " + "; ".join(f"{e.kind} {rng(e.start, e.end)}" for e in evs[:40])
                          + (f"; … {len(evs) - 40} more" if len(evs) > 40 else ""))
@@ -411,8 +462,76 @@ def _peek_source(target: str) -> tuple[str, str | None, float]:
     return v.path, v.id, v.duration
 
 
+def cut_sheet(target: str, size: int) -> tuple[list[bytes], str]:
+    """One image to review an edit: both sides of each cut, then a colour strip of every clip."""
+    from PIL import Image, ImageDraw
+
+    from . import color
+    from .dsl import out_positions
+    from .render import ensure_clips
+
+    path, _, dur = _peek_source(target)
+    if not re.fullmatch(r"[vV]\d+", str(target).strip()):
+        raise VidxError("cuts needs a rendered version, e.g. peek('v3', 'cuts')")
+    tl = ensure_clips(store.get_version(target)["timeline"])
+    fps = float(tl["fps"])
+    segs = [tuple(s) for s in tl["segments"]]
+    pos = out_positions(segs, tl.get("speeds") or 1.0, tl.get("joins") or [])
+    if len(segs) < 2:
+        raise VidxError("this version has no cuts")
+    joins = tl.get("joins") or [0.0] * (len(segs) - 1)
+    pairs = []  # (cut number, last frame before, first frame after)
+    for k in range(1, len(segs)):
+        t, d = pos[k][0], joins[k - 1]
+        pairs.append((k, max(t - 1.5 / fps, 0), min(t + d + 0.5 / fps, max(dur - 0.05, 0))))
+    side = min(size, 240)
+    small = thumbs.grab_frames(path, [x for _, a, b in pairs for x in (a, b)], long_side=96)
+    jumps = []
+    for i, (k, a, b) in enumerate(pairs):
+        fa, fb = small[2 * i], small[2 * i + 1]
+        de = float(np.linalg.norm(color.lab_stats([fa])[0] - color.lab_stats([fb])[0])) if fa and fb else 0.0
+        jumps.append((de, i))
+    worst = sorted(i for _, i in sorted(jumps, reverse=True)[:8])  # 8 pairs = the 4x4 budget
+    frames = thumbs.grab_frames(path, [x for i in worst for x in pairs[i][1:]], long_side=side)
+    de_of = {i: d for d, i in jumps}
+    labels = []
+    for i in worst:
+        k, a, _ = pairs[i]
+        labels += [f"cut {k} {thumbs.mmss(pos[k][0])}", f"after dE {de_of[i]:.0f}"]
+    sheet = thumbs.contact_sheet(frames, labels, cols=4)
+
+    n = min(len(segs), 40)
+    idx = np.linspace(0, len(segs) - 1, n).round().astype(int)
+    mids = thumbs.grab_frames(path, [(pos[i][0] + pos[i][1]) / 2 for i in idx], long_side=64)
+    h = max(44, sheet.height // 12)
+    strip = Image.new("RGB", (sheet.width, h), (20, 20, 20))
+    d = ImageDraw.Draw(strip)
+    w = sheet.width / n
+    font = thumbs._font(max(11, min(15, int(w / 3))))
+    for j, (i, f) in enumerate(zip(idx, mids)):
+        if f is None:
+            continue
+        rgb = tuple(int(v) for v in np.asarray(f).reshape(-1, 3).mean(0))
+        luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+        d.rectangle((j * w, 0, (j + 1) * w - 2, h), fill=rgb)
+        if w >= 26:
+            d.text((j * w + 3, 3), f"{i + 1}", fill=(0, 0, 0) if luma > 128 else (255, 255, 255), font=font)
+    out = Image.new("RGB", (sheet.width, sheet.height + h + 6), (20, 20, 20))
+    out.paste(sheet, (0, 0))
+    out.paste(strip, (0, sheet.height + 6))
+    buf = io.BytesIO()
+    out.save(buf, "JPEG", quality=82)
+    bad = sorted(jumps, reverse=True)[:3]
+    cap = (f"{len(pairs)} cuts" + (f", worst 8 by colour jump shown" if len(pairs) > 8 else "") + "; top jumps: "
+           + ", ".join(f"cut {pairs[i][0]} dE {d:.0f}" for d, i in bad) + f". Strip = clips 1-{len(segs)}, mid-frame colour.")
+    return [buf.getvalue()], cap
+
+
 def peek(target: str, times=None, size: int = 384, grid: bool = True) -> tuple[list[bytes], str]:
-    """Returns (jpeg images, caption). One contact sheet by default (max 4x4)."""
+    """Returns (jpeg images, caption). One contact sheet by default (max 4x4).
+    times="cuts" on a rendered version gives the cut-check view instead."""
+    if times == "cuts" or times == ["cuts"]:
+        return cut_sheet(target, size)
     path, video_id, dur = _peek_source(target)
     size = int(min(max(size, 96), 768))
     shots = store.get_shots(video_id) if video_id else []

@@ -63,10 +63,13 @@ def load_whisper(name: str):
 
         dev = config.device()
         if dev == "cuda":
-            _models[name] = WhisperModel(name, device="cuda", compute_type="float16")
+            opts = {"device": "cuda", "compute_type": "float16"}
         else:  # ctranslate2 has no MPS backend; int8 on CPU is the fast path on Apple silicon
-            _models[name] = WhisperModel(name, device="cpu", compute_type="int8",
-                                         cpu_threads=os.cpu_count() or 4)
+            opts = {"device": "cpu", "compute_type": "int8", "cpu_threads": os.cpu_count() or 4}
+        try:  # never touch the network when the weights are already here
+            _models[name] = WhisperModel(name, local_files_only=True, **opts)
+        except Exception:
+            _models[name] = WhisperModel(name, **opts)
     return _models[name]
 
 
@@ -148,6 +151,7 @@ class Transcript:
                             scripts[sc] = scripts.get(sc, 0) + (we - ws)
             del audio
         store.put_words(video.id, words)
+        _models.clear()  # ~1 GB; reloading takes seconds, holding it in a long-lived server doesn't pay
         tot = sum(scripts.values()) or 1
         mix = {k: round(v / tot, 2) for k, v in scripts.items()} if len(scripts) > 1 else None
         mode = "translated-en" if task == "translate" else "transcribed"

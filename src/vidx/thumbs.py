@@ -42,6 +42,17 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+def caption_font(size: int):
+    """A bold font with wide script coverage, wherever this OS keeps one."""
+    for path in ("/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "C:/Windows/Fonts/arialbd.ttf"):
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return _font(size)
+
+
 def contact_sheet(frames: list[Image.Image | None], labels: list[str], cols: int | None = None) -> Image.Image:
     """Grid of frames, each with its label burned into the top-left corner."""
     n = len(frames)

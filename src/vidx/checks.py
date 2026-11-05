@@ -25,12 +25,14 @@ def word_at(words: list[Word], t: float, tol: float = WORD_TOL) -> Word | None:
     return None
 
 
-def mid_word_cuts(segs, words: list[Word]) -> list[tuple[int, float, Word]]:
-    """Joins (k = index of the segment after the join) where an out- or in-point lands inside a word."""
+def mid_word_cuts(segs, words) -> list[tuple[int, float, Word]]:
+    """Joins (k = index of the segment after the join) where an out- or in-point lands inside a word.
+    words: one list, or one list per segment when clips come from different videos."""
+    per_seg = words if words and isinstance(words[0], list) else [words] * len(segs)
     out = []
     for k in range(1, len(segs)):
-        for t in (segs[k - 1][1], segs[k][0]):
-            w = word_at(words, t)
+        for t, ws in ((segs[k - 1][1], per_seg[k - 1]), (segs[k][0], per_seg[k])):
+            w = word_at(ws, t)
             if w:
                 out.append((k, t, w))
                 break
@@ -38,14 +40,18 @@ def mid_word_cuts(segs, words: list[Word]) -> list[tuple[int, float, Word]]:
 
 
 def audio_pops(segs, samples, sr: int) -> list[tuple[int, float]]:
-    """Hard-cut joins where RMS differs by more than POP_DB across the join."""
+    """Hard-cut joins where RMS differs by more than POP_DB across the join.
+    samples: one audio source, or a list with one per segment (None = that clip has no audio)."""
+    per_seg = samples if isinstance(samples, list) else [samples] * len(segs)
     out = []
     n = int(POP_WIN * sr)
     for k in range(1, len(segs)):
+        if per_seg[k - 1] is None or per_seg[k] is None:
+            continue
         e = int(segs[k - 1][1] * sr)
         s = int(segs[k][0] * sr)
-        before = util.rms_db(samples[max(0, e - n): e])
-        after = util.rms_db(samples[s: s + n])
+        before = util.rms_db(per_seg[k - 1][max(0, e - n): e])
+        after = util.rms_db(per_seg[k][s: s + n])
         diff = abs(before - after)
         if diff > POP_DB and max(before, after) > -45:  # ignore jumps between two near-silences
             out.append((k, round(diff, 1)))
@@ -61,8 +67,8 @@ def check(version_id: str) -> str:
     tl = ver["timeline"]
     v = store.get_video(ver["video_id"])
     segs = frame_snap(tl["segments"], tl["fps"])
-    speed = float(tl.get("speed") or 1.0)
-    trans = tl.get("trans")
+    speed = tl.get("speeds") or float(tl.get("speed") or 1.0)
+    trans = tl.get("joins") if "joins" in tl else tl.get("trans")
 
     def o(t_src: float) -> float:  # output time of a source time
         r = src_to_out(t_src, segs, speed, trans)
@@ -94,21 +100,28 @@ def check(version_id: str) -> str:
             issues.append(f"freeze {util.rng(e.start, e.end)} ({e.end - e.start:.1f}s) -> check the join near"
                           f" {e.start:.1f}" + (f" (src {s:.1f})" if s is not None else ""))
 
-    sil = [(e.start, e.end) for e in store.get_events(v.id, "silence")]
-    words = acoustic_words(store.get_words(v.id), sil)
-    mw = mid_word_cuts(segs, words)
+    vids = [c.get("video") or v.id for c in tl.get("clips") or []]
+    vids = vids if len(vids) == len(segs) else [v.id] * len(segs)  # each clip checks against its own source
+    words_of: dict[str, list[Word]] = {}
+    for vid in set(vids):
+        sil = [(e.start, e.end) for e in store.get_events(vid, "silence")]
+        words_of[vid] = acoustic_words(store.get_words(vid), sil)
+    mw = mid_word_cuts(segs, [words_of[vid] for vid in vids])
     for k, t, w in mw[:4]:
         issues.append(f'mid_word_cut at {join_out(k):.1f} (src {t:.1f} inside "{w.text.strip()}" '
                       f'{w.start:.1f}-{w.end:.1f}) -> add `snap words`')
     if len(mw) > 4:
         issues.append(f"… {len(mw) - 4} more mid-word cuts -> add `snap words`")
 
-    if not trans and v.has_audio and len(segs) > 1:
-        wav = v.dir / "audio16k.wav"
-        if not wav.exists():
-            util.extract_audio16k(v.path, wav)
-        reader = util.WavReader(wav)  # reads only the 30 ms around each join
-        pops = audio_pops(segs, reader, reader.sr)
+    if not any(trans or []) and len(segs) > 1:
+        readers: dict[str, util.WavReader | None] = {}
+        for vid in set(vids):
+            src = store.get_video(vid)
+            wav = src.dir / "audio16k.wav"
+            if src.has_audio and not wav.exists() and os.path.exists(src.path):
+                util.extract_audio16k(src.path, wav)
+            readers[vid] = util.WavReader(wav) if wav.exists() else None  # reads only 30 ms per join
+        pops = audio_pops(segs, [readers[vid] for vid in vids], 16000)
         fix = "`trans xfade 0.08`" if (tl.get("pad") or 0) >= 0.1 else "`pad 0.1` or `trans xfade 0.08`"
         for k, d in pops[:3]:
             issues.append(f"audio_pop at {join_out(k):.1f} ({d:.0f} dB jump) -> {fix}")

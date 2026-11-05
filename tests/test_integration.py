@@ -92,3 +92,43 @@ def test_end_to_end(env):
 
     d = api.diff(ver1, ver2)
     assert "xfade" in d and "-0.6s" in d.splitlines()[0], d
+
+    # the richer index: colour stats per shot, keyframes on disk, labelled audio
+    s0 = store.get_shots(vid)[0]
+    assert s0.detail["color"]["luma"] > 0 and s0.detail["motion"]["peak"] >= 0
+    assert len(s0.detail["keyframes"]) == 3
+    assert (v.dir / "keyframes" / "s1_m.jpg").exists()
+    assert store.get_events(vid, "music"), "tones should be labelled music"
+    assert "motion avg" in api.get_segment(vid, "s1", None, "detail")
+
+    # a JSON timeline: preview, then change one clip and only that clip re-encodes
+    import json
+
+    tl = {"clips": [{"in": 1, "out": 3, "captions": [{"at": 0.2, "for": 1, "text": "Hi"}]},
+                    {"in": 9, "out": 11, "transition": {"dur": 0.3},
+                     "grade": {"match": {"from": 1, "to": 3}}},
+                    {"in": 16, "out": 18}],
+          "audio": [{"sfx": "impact_01", "at": 1.0}, {"music": "drone_01", "gain": -20}]}
+    ver3 = api.edit(vid, json.dumps(tl)).split(":")[0].split()[0]
+    r3 = api.render(ver3, preview=True)
+    assert "reused" in r3 and " 0 reused" in r3, r3
+    assert " 0 encoded" in api.render(ver3, preview=True)
+    tl["clips"][2]["out"] = 17.5
+    ver4 = api.edit(vid, json.dumps(tl)).split(":")[0].split()[0]
+    r4 = api.render(ver4, preview=True)
+    assert " 1 encoded" in r4, r4
+    p = store.get_version(ver4)["output_path"]
+    assert "vidx_renders" in p and "_preview" in p
+    vs = next(s for s in util.ffprobe(p)["streams"] if s["codec_type"] == "video")
+    assert min(vs["width"], vs["height"]) <= 480
+
+    # the cut library end to end: audio handover, punch, whip with its whoosh
+    tl["clips"][0]["transition"] = {"type": "j_cut"}
+    tl["clips"][1]["transition"] = {"type": "whip_left"}
+    ver5 = api.edit(vid, json.dumps(tl)).split(":")[0].split()[0]
+    assert "encoded" in api.render(ver5, preview=True)
+    packed = api.edit(vid, "drop 5-6\ndrop 11-12\ndrop 17-18\ncuts comedy")
+    assert packed.startswith("v"), packed
+
+    imgs, cap = api.peek(ver4, ["cuts"])
+    assert len(imgs) == 1 and imgs[0][:2] == b"\xff\xd8" and "2 cuts" in cap

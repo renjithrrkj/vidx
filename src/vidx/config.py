@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 
 HOME = Path(os.environ.get("VIDX_HOME", Path.home() / ".vidx")).expanduser()
+if os.environ.get("VIDX_MODEL_DIR"):  # keep all model weights in one folder you can copy around
+    os.environ.setdefault("HF_HOME", os.environ["VIDX_MODEL_DIR"])
 DB_PATH = HOME / "vidx.db"
 
 WHISPER_MODEL = os.environ.get("VIDX_WHISPER_MODEL", "small")

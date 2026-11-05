@@ -18,8 +18,21 @@ frames -> edit(id, dsl) -> render(version) -> check(version) -> fix with edit(pa
 Times are seconds. Shots are s1..sN. Versions are v1..vN.
 DSL (one per line): base all|none; drop 30.0-31.2 | drop s7 | drop s3-s5 | drop silence>1.2 | drop black;
 keep 120-150 | keep s3 (with base none, order = output order); snap words; pad 0.15; trans xfade 0.3 | trans cut;
-crop 9:16 center; speed 1.1. Typical clean-up: "drop silence>1.0\\nsnap words\\npad 0.1".
-Render presets: original, reel_9x16 (1080x1920, -16 LUFS, <=90s), yt_16x9 (1920x1080, -14 LUFS)."""
+crop 9:16 center; speed 1.1; match s3 0.8 (colour-match all clips to a reference shot);
+caption 3.0 2.5 Some text; sfx impact_01 at 3.2 gain -6; music drone_02 gain -18.
+Cuts vary the feel of an edit: "cuts hype" picks a cut per join from what is happening there (packs: clean,
+documentary, comedy, hype, trailer; add a number to reroll), "cut 3 smash" sets one join, "cut whip_left" sets all.
+Names: hard smash punch_in punch_big j_cut l_cut dissolve dissolve_slow dip_black dip_white flash whip_left whip_right
+whip_up zoom blur wipe smooth cover reveal iris radial squeeze slices wind pixel gray_fade.
+Typical clean-up: "drop silence>1.0\\nsnap words\\npad 0.1".
+For per-clip control pass a timeline instead of DSL: JSON (or @/path/file.json) with clips [{in, out, video?,
+speed?, crop?, zoom?, grade?{brightness,contrast,saturation,match}, captions?[{at,for,text,pos}], transition?{type,dur?}}]
+and audio [{sfx|music|file, at?, gain?}]. Every edit writes its timeline file; change that file and pass it back.
+Rendering caches each clip, so changing one shot re-encodes only that shot. Use render(preview=true) while iterating,
+then peek(version, ["cuts"]) to review every cut in one image.
+Sounds: drone_01-06, impact_01-06, riser_01-05, whoosh_01-03.
+Render presets: original, reel_9x16 (1080x1920, -16 LUFS, <=90s), yt_16x9 (1920x1080, -14 LUFS).
+Renders land in vidx_renders/ next to the source unless out_path is given."""
 
 mcp = MCPServer("vidx", instructions=INSTRUCTIONS)
 
@@ -44,11 +57,13 @@ async def _run(fn, *a, **kw):
 
 @mcp.tool()
 @_errors
-async def index_video(path: str, force: bool = False, captions: bool = False) -> str:
-    """Index a video file (shots, transcript, audio/visual events, CLIP embeddings). Re-indexing the same
-    file is a no-op unless force=true. captions=true adds one-line shot captions (slower).
+async def index_video(path: str, force: bool = False, captions: bool = False, glitch: bool = False) -> str:
+    """Index a video file: neural shot cuts, keyframes, motion and colour per shot, on-screen text and
+    watermarks, transcript, speech/music/sfx stretches, beats, events, CLIP embeddings. Re-indexing the same
+    file only runs what is missing unless force=true. captions=true adds one-line shot captions (slower).
+    glitch=true also scans AI-generated clips for morphing; hits are suspects, so confirm them with peek.
     Returns video_id, duration, shot count, language and a short summary."""
-    return await _run(api.index_video, path, force, captions)
+    return await _run(api.index_video, path, force, captions, glitch)
 
 
 @mcp.tool()
@@ -62,8 +77,9 @@ async def overview(video_id: str, level: str = "scenes", limit: int = 20, offset
 @mcp.tool()
 @_errors
 async def query(video_id: str, text: str, kind: str = "any", limit: int = 10) -> str:
-    """Find time ranges. kind: speech (exact+fuzzy transcript match), visual (CLIP text->shot),
-    event (e.g. "silence>1.5", "black", "loud", "freeze"), any (event syntax, else speech+visual)."""
+    """Find time ranges. kind: speech (exact+fuzzy transcript match), visual (CLIP text->shot), text (on-screen
+    words), event (e.g. "silence>1.5", "black", "loud", "freeze", "laugh", "glitch", "music", "sfx", "speech",
+    "beat", or any detector trained with `vidx teach`), any (event syntax, else text+speech+visual)."""
     return await _run(api.query, video_id, text, kind, limit)
 
 
@@ -72,7 +88,8 @@ async def query(video_id: str, text: str, kind: str = "any", limit: int = 10) ->
 async def get_segment(video_id: str, start: str, end: str = "",
                       fields: str = "words,events,shots") -> str:
     """Detail for one range: start/end in seconds or shot ids (start="s3" alone = that shot).
-    fields: any of words,events,shots,wordtimes (wordtimes = per-word timestamps for precise cuts)."""
+    fields: any of words,events,shots,wordtimes,detail. wordtimes = per-word timestamps for precise cuts;
+    detail = per-shot motion curve and peak, colour stats, audio level, keyframe times, glitch flag, text boxes."""
     return await _run(api.get_segment, video_id, start, end or None, fields)
 
 
@@ -80,7 +97,9 @@ async def get_segment(video_id: str, start: str, end: str = "",
 async def peek(target: str, times: list[str] | None = None, size: int = 384, grid: bool = True) -> list:
     """SEE frames (costs image tokens; use sparingly). target = video_id or a rendered version id (v3).
     times = seconds or shot ids, e.g. ["12.5", "s3"]; omit for an even visual summary. Returns one
-    contact sheet (max 4x4 tiles, each labeled with its timestamp); size = longest side of a tile."""
+    contact sheet (max 4x4 tiles, each labeled with its timestamp); size = longest side of a tile.
+    times=["cuts"] on a rendered version shows the frames either side of each cut (worst colour jumps
+    first when there are many) plus a colour strip of every clip: a whole edit in one look."""
     try:
         imgs, cap = await _run(api.peek, target, times, size, grid)
     except store.VidxError as e:
@@ -99,9 +118,11 @@ async def edit(video_id: str, dsl: str, parent_version: str = "") -> str:
 
 @mcp.tool()
 @_errors
-async def render(version_id: str, preset: str = "original", out_path: str = "") -> str:
-    """Render a version with ffmpeg. preset: original | reel_9x16 | yt_16x9. Returns path, duration, size."""
-    return await _run(api.render, version_id, preset, out_path or None)
+async def render(version_id: str, preset: str = "original", out_path: str = "", preview: bool = False) -> str:
+    """Render a version. preset: original | reel_9x16 | yt_16x9. preview=true is a fast 480p draft.
+    Clips are cached, so re-rendering after a small change only encodes what changed. Writes next to the
+    source in vidx_renders/ (or to out_path). Returns path, duration, size, pieces encoded vs reused."""
+    return await _run(api.render, version_id, preset, out_path or None, preview)
 
 
 @mcp.tool()

@@ -9,7 +9,7 @@ from .analyzers.probe import probe
 from .util import mmss, snip
 
 
-def index_video(path: str, force: bool = False, captions: bool = False, log=None) -> str:
+def index_video(path: str, force: bool = False, captions: bool = False, glitch: bool = False, log=None) -> str:
     t0 = time.perf_counter()
     v = probe(path)
     existing = None
@@ -25,7 +25,7 @@ def index_video(path: str, force: bool = False, captions: bool = False, log=None
         store.db().execute("UPDATE videos SET path=? WHERE id=?", (v.path, v.id))
         store.db().commit()
     v = store.get_video(v.id)
-    ctx = Context(force=force, captions=captions)
+    ctx = Context(force=force, captions=captions, glitch=glitch)
     if log:
         ctx.log = log
     timings = run_all(v, ctx)
@@ -61,6 +61,17 @@ def summary(video_id: str, timings: dict[str, float] | None = None, total: float
         lines.append(
             f"audio: {v.meta['lufs']:.1f} LUFS, speech ~{speech / max(v.duration, 1e-6) * 100:.0f}% of time, "
             f"silence {sil:.1f}s total; events: " + ", ".join(f"{k} {n}" for k, n in counts.items()))
+    extras = []
+    if v.meta.get("bpm"):
+        extras.append(f"music ~{v.meta['bpm']:g} bpm")
+    marks = v.meta.get("watermarks") or []
+    if marks:
+        extras.append(f"{len(marks)} watermark(s): " + ", ".join((m["text"] or "logo") + f" at x{m['box'][0]:.2f} y{m['box'][1]:.2f}" for m in marks[:3]))
+    glitches = sum(e.kind == "glitch" for e in ev)
+    if glitches:
+        extras.append(f"{glitches} AI-glitch suspect(s): query('{v.id}', 'glitch')")
+    if extras:
+        lines.append("; ".join(extras))
     if words:
         lines.append(f'opens with: "{snip(" ".join(w.text for w in words[:40]), 160)}"')
     tagset: dict[str, float] = {}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import time
+from collections import Counter
 
 from . import config, dsl, store
 from .util import mmss
@@ -54,10 +55,10 @@ def _usage(fn):
 
 
 @_usage
-def index_video(path: str, force: bool = False, captions: bool = False, log=None) -> str:
+def index_video(path: str, force: bool = False, captions: bool = False, glitch: bool = False, log=None) -> str:
     from .index import index_video as _index
 
-    return _index(path, force=force, captions=captions, log=log)
+    return _index(path, force=force, captions=captions, glitch=glitch, log=log)
 
 
 @_usage
@@ -92,7 +93,13 @@ def peek(target: str, times=None, size: int = 384, grid: bool = True) -> tuple[l
 def edit(video_id: str, script: str, parent_version: str | None = None) -> str:
     """Parent semantics: the new script is appended to the parent's script (incremental edit),
     unless it has its own `base` line, in which case it stands alone."""
+    from . import timeline
+
     v = store.get_video(video_id)
+    if timeline.is_timeline(script):  # a full timeline: JSON text or @/path/to/file.json
+        parent = store.get_version(parent_version)["id"] if parent_version else None
+        tl = timeline.load(script, v.id)
+        return _save(tl["video_id"], parent, script.strip(), tl)
     parent_id, sc = None, None
     has_base = any(l.split("#")[0].strip().lower().startswith("base") for l in script.splitlines())
     if parent_version:
@@ -101,11 +108,23 @@ def edit(video_id: str, script: str, parent_version: str | None = None) -> str:
             raise store.VidxError(f"v{parent['id']} belongs to video {parent['video_id']}, not {v.id}")
         parent_id = parent["id"]
         if not has_base:
+            if timeline.is_timeline(parent["dsl"]):
+                raise store.VidxError(f"v{parent_id} is a timeline file: change {_tl_path(v.id, parent_id)} and pass it to edit")
             sc = dsl.parse(parent["dsl"], src=f"v{parent_id}")
     sc = dsl.parse(script, sc=sc)
     full = (parent["dsl"].rstrip() + "\n" + script.strip()) if parent_id and not has_base else script.strip()
-    tl = dsl.resolve(sc, dsl.IndexCtx(v.id))
-    vid = store.put_version(v.id, parent_id, full, tl)
+    return _save(v.id, parent_id, full, dsl.resolve(sc, dsl.IndexCtx(v.id)))
+
+
+def _tl_path(video_id: str, version: int):
+    return config.video_dir(video_id) / f"v{version}.timeline.json"
+
+
+def _save(video_id: str, parent_id, text: str, tl: dict) -> str:
+    from . import timeline
+
+    vid = store.put_version(video_id, parent_id, text, tl)
+    _tl_path(video_id, vid).write_text(json.dumps(timeline.export(tl), indent=1))
     return describe_version(vid)
 
 
@@ -116,12 +135,20 @@ def describe_version(version_id) -> str:
     src = tl["source_duration"]
     delta = tl["out_duration"] - src
     opts = []
-    if tl.get("trans"):
+    if tl.get("trans") and not tl.get("clips"):
         opts.append(f"xfade {tl['trans'][1]}")
     if tl.get("crop"):
         opts.append(f"crop {tl['crop']}")
     if abs((tl.get("speed") or 1) - 1) > 1e-3:
         opts.append(f"speed {tl['speed']}")
+    if any((c.get("grade") or {}).get("match") for c in tl.get("clips") or []):
+        opts.append("colour match")
+    if tl.get("audio"):
+        opts.append(f"{len(tl['audio'])} audio cue(s)")
+    used = Counter((c["transition"].get("type", "dissolve") if c.get("transition") else "hard")
+                   for c in (tl.get("clips") or [])[:-1])
+    if set(used) - {"hard"}:
+        opts.append("cuts: " + ", ".join(f"{n}x {k}" for k, n in used.most_common()))
     lines = [f"v{ver['id']}" + (f" (from v{ver['parent_id']})" if ver["parent_id"] else "")
              + f": {len(segs)} segments, out {mmss(tl['out_duration'])} ({tl['out_duration']:.1f}s, "
              + f"{delta:+.1f}s vs source)" + (" | " + ", ".join(opts) if opts else "")]
@@ -130,15 +157,16 @@ def describe_version(version_id) -> str:
                  + (f", … (+{len(segs) - 8})" if len(segs) > 8 else ""))
     for w in tl.get("warnings", [])[:5]:
         lines.append(f"warn: {w}")
-    lines.append(f"next: render('v{ver['id']}', preset)")
+    lines.append(f"timeline: {_tl_path(ver['video_id'], ver['id'])}")
+    lines.append(f"next: render('v{ver['id']}', preset, preview=true) for a quick look")
     return "\n".join(lines)
 
 
 @_usage
-def render(version_id: str, preset: str = "original", out_path: str | None = None) -> str:
+def render(version_id: str, preset: str = "original", out_path: str | None = None, preview: bool = False) -> str:
     from .render import render as _r
 
-    return _r(version_id, preset, out_path)
+    return _r(version_id, preset, out_path, preview)
 
 
 @_usage

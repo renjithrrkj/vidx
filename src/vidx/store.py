@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS videos(
   width INTEGER, height INTEGER, created_at REAL, meta TEXT DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS shots(
-  video_id TEXT, idx INTEGER, start REAL, end REAL, caption TEXT, motion REAL, tags TEXT,
+  video_id TEXT, idx INTEGER, start REAL, end REAL, caption TEXT, motion REAL, tags TEXT, detail TEXT,
   PRIMARY KEY(video_id, idx)
 );
 CREATE TABLE IF NOT EXISTS words(
@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS versions(
   id INTEGER PRIMARY KEY AUTOINCREMENT, video_id TEXT, parent_id INTEGER,
   dsl TEXT, timeline_json TEXT, output_path TEXT, preset TEXT, created_at REAL
 );
+CREATE TABLE IF NOT EXISTS overlays(
+  video_id TEXT, kind TEXT, start REAL, end REAL, x REAL, y REAL, w REAL, h REAL, text TEXT
+);
+CREATE INDEX IF NOT EXISTS overlays_vid ON overlays(video_id, kind, start);
 CREATE TABLE IF NOT EXISTS analyzer_runs(
   video_id TEXT, name TEXT, seconds REAL, info TEXT, done_at REAL,
   PRIMARY KEY(video_id, name)
@@ -67,6 +71,7 @@ class Shot:
     caption: str | None = None
     motion: float | None = None
     tags: str | None = None
+    detail: dict = field(default_factory=dict)
 
     @property
     def dur(self) -> float:
@@ -102,6 +107,10 @@ def db() -> sqlite3.Connection:
         _conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
         _conn.row_factory = sqlite3.Row
         _conn.executescript(SCHEMA)
+        cols = {r["name"] for r in _conn.execute("PRAGMA table_info(shots)")}
+        if "detail" not in cols:  # databases created before per-shot detail
+            _conn.execute("ALTER TABLE shots ADD COLUMN detail TEXT")
+            _conn.commit()
     return _conn
 
 
@@ -139,7 +148,7 @@ def list_videos() -> list[VideoInfo]:
 
 def delete_video_data(video_id: str) -> None:
     c = db()
-    for t in ("shots", "words", "events"):
+    for t in ("shots", "words", "events", "overlays"):
         c.execute(f"DELETE FROM {t} WHERE video_id=?", (video_id,))
     c.execute("DELETE FROM analyzer_runs WHERE video_id=?", (video_id,))
     c.commit()
@@ -167,8 +176,9 @@ def analyzer_runs(video_id: str) -> dict[str, dict]:
 def put_shots(video_id: str, shots: list[Shot]) -> None:
     c = db()
     c.execute("DELETE FROM shots WHERE video_id=?", (video_id,))
-    c.executemany("INSERT INTO shots VALUES(?,?,?,?,?,?,?)",
-                  [(video_id, s.idx, s.start, s.end, s.caption, s.motion, s.tags) for s in shots])
+    c.executemany("INSERT INTO shots VALUES(?,?,?,?,?,?,?,?)",
+                  [(video_id, s.idx, s.start, s.end, s.caption, s.motion, s.tags, json.dumps(s.detail))
+                   for s in shots])
     c.commit()
 
 
@@ -182,7 +192,43 @@ def update_shot_field(video_id: str, column: str, values: dict[int, str | None])
 
 def get_shots(video_id: str) -> list[Shot]:
     rows = db().execute("SELECT * FROM shots WHERE video_id=? ORDER BY idx", (video_id,))
-    return [Shot(r["idx"], r["start"], r["end"], r["caption"], r["motion"], r["tags"]) for r in rows]
+    return [Shot(r["idx"], r["start"], r["end"], r["caption"], r["motion"], r["tags"],
+                 json.loads(r["detail"] or "{}")) for r in rows]
+
+
+def merge_shot_detail(video_id: str, values: dict[int, dict]) -> None:
+    """Merge per-shot detail from one analyzer into shots.detail (analyzers own separate keys)."""
+    c = db()
+    for idx, new in values.items():
+        r = c.execute("SELECT detail FROM shots WHERE video_id=? AND idx=?", (video_id, idx)).fetchone()
+        if r is not None:
+            cur = json.loads(r["detail"] or "{}")
+            cur.update(new)
+            c.execute("UPDATE shots SET detail=? WHERE video_id=? AND idx=?", (json.dumps(cur), video_id, idx))
+    c.commit()
+
+
+def put_overlays(video_id: str, rows: list[tuple]) -> None:
+    """rows: (kind, start, end, x, y, w, h, text); x/y/w/h are 0-1 fractions of the frame."""
+    c = db()
+    c.execute("DELETE FROM overlays WHERE video_id=?", (video_id,))
+    c.executemany("INSERT INTO overlays VALUES(?,?,?,?,?,?,?,?,?)", [(video_id, *r) for r in rows])
+    c.commit()
+
+
+def get_overlays(video_id: str, kind: str | None = None, start: float | None = None,
+                 end: float | None = None) -> list[dict]:
+    q, args = "SELECT kind,start,end,x,y,w,h,text FROM overlays WHERE video_id=?", [video_id]
+    if kind:
+        q += " AND kind=?"
+        args.append(kind)
+    if start is not None:
+        q += " AND end>?"
+        args.append(start)
+    if end is not None:
+        q += " AND start<?"
+        args.append(end)
+    return [dict(r) for r in db().execute(q + " ORDER BY start", args)]
 
 
 def put_words(video_id: str, words: list[Word]) -> None:

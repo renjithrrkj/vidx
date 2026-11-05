@@ -8,6 +8,12 @@
     trans xfade 0.3 | trans cut
     crop 9:16 center | crop off
     speed 1.25
+    match s3 0.8                      colour-match every clip to shot s3 (or a time), strength 0-1
+    caption 3.0 2.5 Some text         burn in text at output time 3.0 for 2.5s
+    sfx impact_01 at 3.2 gain -6      bundled sound at output time 3.2
+    music drone_02 gain -18           bundled bed under the whole edit
+    cuts hype                         a style pack picks a cut for each join (seed optional: cuts hype 7)
+    cut whip_left | cut 3 smash       one cut for every join, or for join 3 (see `vidx cuts`)
 
 Pipeline: base -> keep/drop (line order) -> snap -> pad -> merge (<0.1s gaps) -> discard (<0.3s).
 Times accept seconds (12.5) or mm:ss.s (1:02.5).
@@ -46,6 +52,12 @@ class Script:
     trans: tuple[str, float] | None = None
     crop: str | None = None
     speed: float = 1.0
+    match: tuple[str, float] | None = None
+    captions: list = field(default_factory=list)
+    audio: list = field(default_factory=list)
+    cut_all: str | None = None
+    cut_at: dict = field(default_factory=dict)
+    pack: tuple[str, int | None] | None = None
 
 
 def parse_time(tok: str, line: int) -> float:
@@ -124,8 +136,38 @@ def parse(text: str, src: str = "", sc: Script | None = None) -> Script:
             sc.speed = parse_time(args[0], n)
             if not 0.25 <= sc.speed <= 4:
                 raise err("speed must be 0.25-4.0")
+        elif cmd == "cuts":
+            if len(args) not in (1, 2) or (len(args) == 2 and not args[1].isdigit()):
+                raise err("cuts takes a pack and an optional seed: cuts hype 7")
+            sc.pack = (args[0], int(args[1]) if len(args) == 2 else None)
+        elif cmd == "cut":
+            if len(args) == 1:
+                sc.cut_all = args[0]
+            elif len(args) == 2 and args[0].isdigit():
+                sc.cut_at[int(args[0])] = args[1]
+            else:
+                raise err("cut takes a name, or a join number and a name: cut smash / cut 3 smash")
+        elif cmd == "match":
+            if len(args) not in (1, 2):
+                raise err("match takes a shot or time, and an optional strength: match s3 0.8")
+            strength = float(args[1]) if len(args) == 2 else 0.8
+            if not 0 < strength <= 1:
+                raise err("match strength must be 0-1")
+            sc.match = (args[0], strength)
+        elif cmd == "caption":
+            if len(args) < 3:
+                raise err('caption takes time, duration, text: caption 3.0 2.5 Hello there')
+            sc.captions.append({"at": parse_time(args[0], n), "for": parse_time(args[1], n), "text": " ".join(args[2:])})
+        elif cmd in ("sfx", "music"):
+            opts = dict(zip(args[1::2], args[2::2]))
+            if not args or len(args) % 2 == 0 or set(opts) - {"at", "gain"}:
+                raise err(f"{cmd} takes a name, then 'at <sec>' / 'gain <dB>': {cmd} impact_01 at 3.2 gain -6")
+            entry = {cmd: args[0], "gain": float(opts.get("gain", -6 if cmd == "sfx" else -18))}
+            if cmd == "sfx":
+                entry["at"] = parse_time(opts.get("at", "0"), n)
+            sc.audio.append(entry)
         else:
-            raise err(f"unknown command {cmd!r} (base, drop, keep, snap, pad, trans, crop, speed)")
+            raise err(f"unknown command {cmd!r} (base, drop, keep, snap, pad, trans, crop, speed, match, caption, sfx, music, cuts, cut)")
     return sc
 
 
@@ -273,29 +315,44 @@ def out_duration(segs: list[Seg], speed: float = 1.0, trans: tuple[str, float] |
     return d
 
 
-def out_positions(segs: list[Seg], speed: float = 1.0, trans=None) -> list[tuple[float, float]]:
-    """Output (start, end) of each source segment. xfade overlaps consecutive segments by d."""
-    d = float(trans[1]) if trans else 0.0
+def _per_seg(speed, n: int) -> list[float]:
+    return list(speed) if isinstance(speed, (list, tuple)) else [speed] * n
+
+
+def _per_join(trans, n: int) -> list[float]:
+    """trans: None, ("xfade", d) for every join, or an explicit list of join lengths."""
+    if not trans:
+        return [0.0] * max(n - 1, 0)
+    if isinstance(trans[0], str):
+        return [float(trans[1])] * max(n - 1, 0)
+    return [float(x) for x in trans]
+
+
+def out_positions(segs: list[Seg], speed=1.0, trans=None) -> list[tuple[float, float]]:
+    """Output (start, end) of each source segment. A transition overlaps its neighbours."""
+    speeds, joins = _per_seg(speed, len(segs)), _per_join(trans, len(segs))
     out, t = [], 0.0
     for k, (s, e) in enumerate(segs):
-        start = t if k == 0 else t - d
-        end = start + (e - s) / speed
+        start = t if k == 0 else t - joins[k - 1]
+        end = start + (e - s) / speeds[k]
         out.append((start, end))
         t = end
     return out
 
 
-def src_to_out(t_src: float, segs: list[Seg], speed: float = 1.0, trans=None) -> float | None:
-    for (s, e), (o0, _) in zip(segs, out_positions(segs, speed, trans)):
+def src_to_out(t_src: float, segs: list[Seg], speed=1.0, trans=None) -> float | None:
+    speeds = _per_seg(speed, len(segs))
+    for k, ((s, e), (o0, _)) in enumerate(zip(segs, out_positions(segs, speed, trans))):
         if s - EPS <= t_src <= e + EPS:
-            return o0 + (t_src - s) / speed
+            return o0 + (t_src - s) / speeds[k]
     return None
 
 
-def out_to_src(t_out: float, segs: list[Seg], speed: float = 1.0, trans=None) -> float | None:
-    for (s, e), (o0, o1) in zip(segs, out_positions(segs, speed, trans)):
+def out_to_src(t_out: float, segs: list[Seg], speed=1.0, trans=None) -> float | None:
+    speeds = _per_seg(speed, len(segs))
+    for k, ((s, e), (o0, o1)) in enumerate(zip(segs, out_positions(segs, speed, trans))):
         if o0 - EPS <= t_out <= o1 + EPS:
-            return s + (t_out - o0) * speed
+            return s + (t_out - o0) * speeds[k]
     return None
 
 
@@ -370,19 +427,51 @@ def resolve(sc: Script, ctx) -> dict:
             new = round(max(0.04, shortest / 2 - 0.01), 2)
             warnings.append(f"xfade {trans[1]}s longer than half the shortest segment ({shortest:.1f}s); using {new}s")
             trans = (trans[0], new)
-    return {
+    tl = {
         "video_id": ctx.video_id,
         "source_duration": round(D, 3),
         "fps": ctx.fps,
-        "segments": [[round(a, 3), round(b, 3)] for a, b in segs],
         "trans": list(trans) if trans else None,
         "crop": sc.crop,
         "speed": sc.speed,
         "snap": sc.snap,
         "pad": sc.pad,
-        "out_duration": round(out_duration(segs, sc.speed, trans), 3),
         "warnings": warnings,
+        "audio": sc.audio,
     }
+    tl["clips"] = build_clips(segs, sc, trans, ctx)
+    from .timeline import clamp, finish
+
+    clamp(tl["clips"], warnings)
+    return finish(tl)
+
+
+def build_clips(segs: list[Seg], sc: Script, trans, ctx) -> list[dict]:
+    grade = {}
+    if sc.match:
+        (a, b), = _resolve_target(sc.match[0] if "-" in sc.match[0] or sc.match[0].lower().startswith("s")
+                                  else f"{sc.match[0]}-{float(parse_time(sc.match[0], 0)) + 1}", 0, ctx)
+        grade = {"match": {"from": a, "to": b, "strength": sc.match[1], "video": ctx.video_id}}
+    clips = []
+    for i, (a, b) in enumerate(segs):
+        c: dict = {"in": round(a, 3), "out": round(b, 3), "video": ctx.video_id, "speed": sc.speed}
+        if sc.crop:
+            c["crop"] = sc.crop
+        if grade:
+            c["grade"] = grade
+        if trans and i < len(segs) - 1:
+            c["transition"] = {"type": "dissolve", "dur": trans[1]}
+        clips.append(c)
+    if sc.pack or sc.cut_all or sc.cut_at:
+        from . import cuts
+
+        pack, seed = sc.pack or (None, None)
+        cuts.apply(clips, sc.cut_all, sc.cut_at, pack, seed, ctx)
+    pos = out_positions(segs, sc.speed, trans)
+    for cap in sc.captions:  # output time -> the clip showing at that moment
+        k = next((i for i, (o0, o1) in enumerate(pos) if o0 <= cap["at"] < o1), len(pos) - 1)
+        clips[k].setdefault("captions", []).append({**cap, "at": round(cap["at"] - pos[k][0], 3)})
+    return clips
 
 
 class IndexCtx:

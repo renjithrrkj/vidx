@@ -74,3 +74,94 @@ def test_chunk_bounds_cut_in_quiet_gaps(tmp_path):
     assert b[0][0] == 0 and b[-1][1] == r.duration
     assert all(b[i][1] == b[i + 1][0] for i in range(len(b) - 1))  # contiguous
     assert 4.0 <= b[0][1] <= 4.6 and 9.2 <= b[1][1] <= 9.8
+
+
+def _thumbs(pattern_a, pattern_b, n=60, cut=30):
+    return np.stack([pattern_a if i < cut else pattern_b for i in range(n)]).astype(np.uint8)
+
+
+def test_cuts_snap_to_exact_frame_and_reject_flashes():
+    from vidx.analyzers.shots import cuts_from_scores, is_flash
+
+    rng = np.random.default_rng(0)
+    a, b = rng.integers(0, 255, (18, 32)), rng.integers(0, 255, (18, 32))
+    th = _thumbs(a, b)
+    motion = np.full(60, 0.004, np.float32)
+    motion[30] = 0.3
+    scores = np.zeros(60)
+    scores[28:30] = 0.9  # the network's peak sits two frames early
+    assert cuts_from_scores(scores, motion, th) == [30]
+    assert cuts_from_scores(np.zeros(60), motion, th) == [30]  # jump alone is enough
+
+    # brightness flash: same picture, brighter
+    fl = np.stack([a if not 30 <= i < 33 else np.clip(a * 0.6 + 90, 0, 255) for i in range(60)]).astype(np.uint8)
+    assert is_flash(fl, 30)
+    # scene revealed for a moment, then the old picture returns
+    rv = np.stack([a if not 30 <= i < 36 else b for i in range(60)]).astype(np.uint8)
+    assert is_flash(rv, 30)
+    assert not is_flash(th, 30)
+
+
+def test_sustained_motion_is_not_a_cut():
+    from vidx.analyzers.shots import jump_candidates
+
+    m = np.full(100, 0.12, np.float32) + np.random.default_rng(1).random(100).astype(np.float32) * 0.03
+    assert jump_candidates(m) == []  # a fight: constant big movement
+
+
+def test_watermark_vs_text_clustering():
+    from vidx.analyzers.detail import cluster_text
+
+    hits = [(t, 0.9, 0.05, 0.08, 0.03, "ACME") for t in range(0, 10)] + [(4, 0.3, 0.8, 0.4, 0.05, "Chapter one")]
+    rows = cluster_text(hits, 10, 1.0)
+    kinds = {r[7]: r[0] for r in rows}
+    assert kinds == {"ACME": "watermark", "Chapter one": "text"}
+
+
+def test_static_logo_found_but_letterbox_ignored():
+    from vidx.analyzers.detail import static_logo_boxes
+
+    rng = np.random.default_rng(2)
+    maps = []
+    for _ in range(8):
+        e = (rng.random((100, 200)) > 0.97).astype(np.uint8) * 255
+        e[5:15, 170:190] = 255   # logo, same place every time
+        e[0:1, :] = 255          # letterbox edge, reaches frame edges
+        maps.append(e)
+    boxes = static_logo_boxes(maps)
+    assert len(boxes) == 1 and 0.8 < boxes[0][0] < 0.9 and boxes[0][1] < 0.1
+
+
+def test_glitch_needs_sustained_spike_above_shot_baseline():
+    from vidx.analyzers.glitch import find_suspect
+
+    r = np.full(60, 3.0, np.float32) + np.random.default_rng(3).random(60).astype(np.float32)
+    assert find_suspect(r) is None
+    r2 = r.copy()
+    r2[30:34] = 30
+    assert find_suspect(r2)[0] == 30
+    r3 = r.copy()
+    r3[30] = 30  # one frame is noise
+    assert find_suspect(r3) is None
+
+
+def test_audio_labels_and_beats():
+    from vidx.analyzers.audiomap import frame_features, label_windows, smooth, stretches, track_beats
+
+    sr = 16000
+    t = np.arange(sr * 6) / sr
+    tone = 0.3 * (np.sin(2 * np.pi * 220 * t) + np.sin(2 * np.pi * 330 * t))
+    noise = 0.3 * np.random.default_rng(4).standard_normal(sr * 2)
+    x = np.concatenate([tone, np.zeros(sr * 2), noise]).astype(np.float32)
+    rms, flat, flux = frame_features(x, sr)
+    ev = stretches(smooth(label_windows(rms, flat, flux, np.zeros(len(rms), bool))))
+    assert [e.kind for e in ev] == ["music", "sfx"]
+    assert ev[0].end == 6.0 and ev[1].start == 8.0
+
+    clicks = np.zeros(sr * 20, np.float32)  # 120 bpm
+    for k in np.arange(0, 20, 0.5):
+        i = int(k * sr)
+        clicks[i: i + 160] = np.random.default_rng(int(k * 2)).standard_normal(160) * 0.8
+    bpm, strength, beats = track_beats(frame_features(clicks, sr)[2])
+    assert abs(bpm - 120) < 4 and strength > 0.25
+    assert abs(np.median(np.diff(beats)) - 0.5) < 0.03

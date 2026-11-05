@@ -60,3 +60,15 @@ def test_audio_pop_detection():
     pops = audio_pops([(0, 1.0), (2.5, 3.5)], x, sr)  # silence -> tone
     assert pops and pops[0][0] == 1 and pops[0][1] > 12
     assert audio_pops([(0, 1.0), (1.5, 2.0)], x, sr) == []  # silence -> silence
+
+
+def test_multi_source_joins_use_each_clips_own_words_and_audio():
+    a = [Word(1.0, 2.0, "alpha")]
+    b = [Word(5.0, 6.0, "beta")]
+    # the in-point 1.5 is inside "alpha", but that word belongs to the OTHER clip's video
+    assert mid_word_cuts([(0, 3), (1.5, 4)], [a, b]) == []
+    assert len(mid_word_cuts([(0, 3), (5.5, 7)], [a, b])) == 1
+    sr = 16000
+    quiet, loud = np.zeros(sr * 2, np.float32), np.full(sr * 2, 0.5, np.float32)
+    assert audio_pops([(0, 1), (0.5, 1.5)], [quiet, loud], sr)
+    assert audio_pops([(0, 1), (0.5, 1.5)], [quiet, None], sr) == []

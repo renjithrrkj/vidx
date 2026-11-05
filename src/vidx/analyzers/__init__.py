@@ -15,6 +15,7 @@ from ..store import VideoInfo
 class Context:
     force: bool = False
     captions: bool = False
+    glitch: bool = False
     log: Callable[[str], None] = lambda m: print(m, file=sys.stderr, flush=True)
     timings: dict[str, float] = field(default_factory=dict)
 
@@ -39,27 +40,39 @@ class Analyzer(Protocol):
 
 def registry() -> list[Analyzer]:
     from .audio import AudioEvents
+    from .audiomap import AudioMap
     from .captions import Captions
+    from .detail import Detail
+    from .glitch import Glitch
     from .laugh import Laugh
     from .shots import Shots
     from .transcript import Transcript
     from .visual import Visual
 
-    # shots before visual/captions (per shot); laugh after transcript (uses words as a speech mask)
-    return [Shots(), Visual(), Transcript(), AudioEvents(), Laugh(), Captions()]
+    # shots first (the rest work per shot); laugh after transcript (uses words as a speech mask)
+    return [Shots(), Detail(), Visual(), Transcript(), AudioEvents(), AudioMap(), Laugh(), Glitch(), Captions()]
+
+
+# Per-shot results: these must be redone whenever shot boundaries change.
+SHOT_DEPENDENT = ("detail", "visual", "audiomap", "glitch", "captions")
 
 
 def run_all(video: VideoInfo, ctx: Context) -> dict[str, float]:
+    runs = store.analyzer_runs(video.id)
     for a in registry():
         if a.optional and not getattr(ctx, a.name, False):
             continue
-        if not ctx.force and store.analyzer_done(video.id, a.name):
+        version = getattr(a, "version", 1)
+        if not ctx.force and a.name in runs and runs[a.name].get("v", 1) >= version:
             ctx.log(f"  {a.name:<11} cached")
             continue
         t0 = time.perf_counter()
         res = a.run(video, ctx)
         dt = time.perf_counter() - t0
         ctx.timings[a.name] = dt
-        store.mark_analyzer(video.id, a.name, dt, res.info)
+        store.mark_analyzer(video.id, a.name, dt, {**res.info, "v": version})
+        if a.name == "shots":  # new boundaries invalidate everything stored per shot
+            for name in SHOT_DEPENDENT:
+                runs.pop(name, None)
         ctx.log(f"  {a.name:<11} {dt:6.1f}s" + (f"  ({res.skipped})" if res.skipped else ""))
     return ctx.timings

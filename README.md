@@ -6,10 +6,11 @@
 **Let AI agents edit video without burning tokens on frames.**
 
 For an agent to "watch" a 10-minute video at 1 frame per second costs ~67,000 tokens; an hour is ~400,000.
-vidx watches it once, locally, and gives the agent a compact text map instead: shots, transcript,
-silences, laughs, loud moments and text-searchable visuals. The agent reads a ~600-token overview,
-searches what it needs, edits with a few lines of script, renders with ffmpeg and runs automatic QA.
-Pixels reach the agent only when it explicitly asks to look (`peek`).
+vidx watches it once, locally, and gives the agent a compact text map instead: exact shots, keyframes,
+motion and colour per shot, on-screen text and watermarks, a transcript, speech/music/sfx stretches,
+beats, and text-searchable visuals. The agent reads a ~600-token overview, searches what it needs,
+edits with a few lines of script or a timeline file, previews at 480p, renders only what changed, and
+runs automatic QA. Pixels reach the agent only when it explicitly asks to look (`peek`).
 
 Runs 100% locally. No paid APIs. Works with any MCP agent (Claude Code, Claude Desktop, …).
 
@@ -35,8 +36,10 @@ claude mcp add vidx -- uvx --from git+https://github.com/renjithrrkj/vidx vidx-m
 No clone needed. Then ask your agent something like *"index ~/Movies/talk.mp4, cut the dead air
 and make a 9:16 reel of the part where I talk about pricing"*.
 
-The first index downloads Whisper `small` (~460 MB) and CLIP ViT-B-32 (~600 MB). Indexing takes
-CPU time, not tokens: about 10 min per hour of video on an M1, under ~1 GB of RAM.
+The first index downloads Whisper `small` (~460 MB) and CLIP ViT-B-32 (~600 MB); run `vidx setup` to
+fetch them ahead of time. After that vidx never touches the network. The shot detector, OCR and speech
+detector ship inside their packages. Set `VIDX_MODEL_DIR` to keep all weights in one folder you can copy.
+Indexing costs CPU time, not tokens, and stays around 1 GB of RAM.
 
 **Claude Desktop / other MCP clients:** add to your MCP config (desktop apps don't inherit your shell
 PATH, so give full paths):
@@ -64,13 +67,13 @@ Tested on macOS (Apple silicon). Linux should work (CPU/CUDA); Windows is untest
 
 | Tool | What it returns |
 |---|---|
-| `index_video(path, force, captions)` | video_id, duration, shots, language, short summary |
+| `index_video(path, force, captions, glitch)` | video_id, duration, shots, language, short summary |
 | `overview(video_id, level, limit, offset)` | table of contents (scenes cover the whole video in ≤limit lines) |
-| `query(video_id, text, kind, limit)` | ranked time ranges: speech / visual (CLIP) / event (`silence>1.5`) |
-| `get_segment(video_id, start, end, fields)` | words, events, shots for one range (`fields=wordtimes` for per-word stamps) |
-| `peek(target, times, size, grid)` | **image**: one contact sheet, ≤4×4 labeled tiles |
-| `edit(video_id, dsl, parent_version)` | version id + segment count, output duration, warnings |
-| `render(version_id, preset, out_path)` | output path, duration, size |
+| `query(video_id, text, kind, limit)` | ranked time ranges: speech / visual (CLIP) / on-screen text / event (`silence>1.5`, `music`, `sfx`, `beat`, `laugh`, `glitch`) |
+| `get_segment(video_id, start, end, fields)` | words, events, shots for one range (`wordtimes` = per-word stamps; `detail` = motion curve and peak, colour, audio level, keyframes, text boxes) |
+| `peek(target, times, size, grid)` | **image**: one contact sheet, ≤4×4 labeled tiles. `times=["cuts"]` on a version = both sides of every cut + a colour strip of all clips |
+| `edit(video_id, dsl, parent_version)` | DSL or a JSON timeline; version id, segment count, output duration, warnings, timeline file path |
+| `render(version_id, preset, out_path, preview)` | output path, duration, size, pieces encoded vs reused. `preview=true` = fast 480p |
 | `check(version_id)` | QA report ≤15 lines, `OK` when clean |
 | `diff(version_a, version_b)` | added / removed / moved source ranges, duration delta |
 
@@ -88,10 +91,70 @@ pad 0.15              # handles around kept segments (never into a neighbouring 
 trans xfade 0.3       # crossfade at every join (default: hard cut)
 crop 9:16 center
 speed 1.1
+match s3 0.8          # colour-match every clip to shot s3 (or a time), strength 0-1
+caption 3.0 2.5 Some text           # output time, duration, text
+sfx impact_01 at 3.2 gain -6        # bundled sound at output time 3.2
+music drone_02 gain -18             # bundled bed under the whole edit
 ```
 
 Typical dead-air cleanup: `drop silence>1.0` / `snap words` / `pad 0.1`.
 `edit(..., parent_version="v3")` appends to v3's script, so fixes from `check` are one-liners.
+
+## Cuts
+
+So an edit doesn't feel like one trick repeated, vidx has 27 named cuts (`vidx cuts` lists them):
+
+- **Editorial:** `hard`, `smash` (with an impact hit), `punch_in` / `punch_big` (zoom that hides a jump cut),
+  `j_cut` / `l_cut` (sound leads or trails the picture).
+- **Transitions:** `dissolve`, `dissolve_slow`, `dip_black`, `dip_white`, `flash`, `whip_left/right/up`, `zoom`, `blur`,
+  `wipe`, `smooth`, `cover`, `reveal`, `iris`, `radial`, `squeeze`, `slices`, `wind`, `pixel`, `gray_fade`.
+
+```
+cuts hype        # a style pack picks each cut from what happens at that join
+cuts hype 7      # same pack, different roll
+cut 3 smash      # set one join
+cut whip_left    # set all joins
+```
+
+Packs: `clean`, `documentary`, `comedy`, `hype`, `trailer`. They look at each join: same shot on both sides
+(a jump cut, so punch in), speech crossing it (bridge with a J or L cut), fast motion (whip), a big colour
+change (dip or flash). They never repeat an effect twice in a row, and hard cuts stay the most common.
+
+## Train your own detector
+
+Teach vidx a moment it doesn't know, from time ranges you label:
+
+```bash
+uv run vidx teach knockdown --pos abcd1234:12-14,abcd1234:88-90,ef012345:30-33 --neg abcd1234:50-70,ef012345:0-20,ef012345:40-60
+```
+
+This trains a small new layer (about 500 weights) on frozen CLIP embeddings plus motion, in under a minute.
+It reports precision and recall on held-out ranges. Then `query(video_id, "knockdown")` finds it in any video.
+When it gets something wrong, add that range to `--neg` and teach again. Use several videos: a detector taught
+on one video may learn that video rather than the idea. It sees one frame per second plus motion, so it suits
+things visible in a frame or a burst of movement, not a split-second contact.
+
+## Timeline files
+
+Every edit, DSL or not, compiles to one JSON timeline, saved as `~/.vidx/<id>/v<N>.timeline.json`. Change
+it and pass it back with `edit(id, "@/path/to/file.json")`, or write one directly for per-clip control:
+
+```json
+{"clips": [
+   {"in": 12.0, "out": 18.5, "captions": [{"at": 0.5, "for": 2, "text": "Hello"}]},
+   {"in": 40.0, "out": 44.0, "video": "other_video_id", "speed": 1.2,
+    "grade": {"contrast": 1.05, "match": {"from": 12, "to": 18}},
+    "transition": {"type": "xfade", "dur": 0.3}},
+   {"in": 90.0, "out": 95.0}],
+ "audio": [{"sfx": "impact_01", "at": 3.2, "gain": -6}, {"music": "drone_02", "gain": -18}]}
+```
+
+Rendering caches each clip and each transition in `~/.vidx/cache` (5 GB, `VIDX_CACHE_GB`). Change one shot
+and only that shot re-encodes; the rest is a stream copy. Renders land in `vidx_renders/` next to the
+source (`VIDX_OUTPUT_DIR` to override).
+
+Sounds: `drone_01`-`06`, `impact_01`-`06`, `riser_01`-`05`, `whoosh_01`-`03`. All synthesized by
+`scripts/make_sfx.py`, so they ship under this repo's MIT license.
 
 Presets: `original` (as is), `reel_9x16` (1080×1920, −16 LUFS, ≤90 s), `yt_16x9` (1920×1080, −14 LUFS).
 
@@ -104,7 +167,10 @@ uv run vidx query 5450c7a6 "whiteboard diagram" --kind visual
 uv run vidx segment 5450c7a6 120 150
 uv run vidx peek 5450c7a6 "12.5,s3,40" --out sheet.jpg
 uv run vidx edit 5450c7a6 "drop silence>1.0;snap words;pad 0.1"
+uv run vidx render v1 --preset reel_9x16 --preview
 uv run vidx render v1 --preset reel_9x16
+uv run vidx peek v1 cuts --out cuts.jpg
+uv run vidx cuts             # the cut library
 uv run vidx check v1
 uv run vidx diff v1 v2
 uv run vidx usage            # characters returned per call (~tokens)
@@ -115,6 +181,8 @@ uv run vidx usage            # characters returned per call (~tokens)
 - `uv sync --extra captions` → `index_video(..., captions=true)` adds Florence-2 one-line shot captions.
 - `uv sync --extra otio` → every render also writes a `.otio` timeline (opens in Resolve / Premiere).
 - `laugh` events (heuristic audience-reaction detector) run by default: `query(id, "laugh")`.
+- `index_video(..., glitch=true)` scans AI-generated clips for morphing and reports the last clean frame.
+  These are suspects to confirm with `peek`: expect about one false alarm per handheld phone clip.
 
 ## Measured (Apple M1, 8 GB, CPU whisper + MPS CLIP)
 
@@ -140,12 +208,18 @@ translation** (flagged in the summary). Set `VIDX_WHISPER_MODEL=large-v3` for na
 
 ```
 src/vidx/
-  analyzers/   probe, shots, visual (CLIP + tags + windows), transcript, audio events (+letterbox),
-               laugh, captions (optional)  — pluggable list
+  analyzers/   probe, shots (TransNetV2 + curves), detail (keyframes, OCR, watermarks), visual, transcript,
+               audio events (+letterbox), audiomap (speech/music/sfx, beats), laugh, glitch, captions
+               — pluggable list
   store.py     SQLite (~/.vidx/vidx.db) + per-video .npy embeddings
   query.py     overview / query / get_segment / peek
   dsl.py       edit script -> timeline (pure segment math)
-  render.py    timeline -> ffmpeg
+  timeline.py  the JSON edit format and its validation
+  render.py    timeline -> cached pieces -> ffmpeg
+  color.py     Reinhard colour match as a 3D LUT
+  cuts.py      the cut library and style packs
+  detect.py    trainable detectors on frozen CLIP
+  assets/sfx/  20 bundled sounds
   checks.py    QA      diff.py  version compare
   api.py       the 9 operations (+ usage log)   cli.py / mcp_server.py thin wrappers
   otio_export.py  .otio next to renders

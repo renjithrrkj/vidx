@@ -73,8 +73,8 @@ def _lis_keep(keys: list[tuple]) -> set[int]:
 def diff_timelines(ta: dict, tb: dict) -> dict:
     a = [tuple(s) for s in ta["segments"]]
     b = [tuple(s) for s in tb["segments"]]
-    pa = out_positions(a, ta.get("speed") or 1, ta.get("trans"))
-    pb = out_positions(b, tb.get("speed") or 1, tb.get("trans"))
+    pa = out_positions(a, ta.get("speeds") or ta.get("speed") or 1, ta.get("joins", ta.get("trans")))
+    pb = out_positions(b, tb.get("speeds") or tb.get("speed") or 1, tb.get("joins", tb.get("trans")))
 
     sa, sb = ta.get("speed") or 1, tb.get("speed") or 1
 

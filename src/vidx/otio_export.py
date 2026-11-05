@@ -13,22 +13,23 @@ def export(timeline: dict, src_path: str, out_path: Path, name: str) -> Path | N
 
     fps = float(timeline["fps"])
     segs = frame_snap(timeline["segments"], fps)
-    trans = timeline.get("trans")
+    joins = timeline.get("joins") or [(timeline.get("trans") or [None, 0])[1]] * (len(segs) - 1)
     ref = otio.schema.ExternalReference(target_url=Path(src_path).resolve().as_uri())
     tl = otio.schema.Timeline(name=name)
     tl.global_start_time = otio.opentime.RationalTime(0, fps)
     for kind in (otio.schema.TrackKind.Video, otio.schema.TrackKind.Audio):
         track = otio.schema.Track(name=kind, kind=kind)
         for i, (a, b) in enumerate(segs):
-            if i and trans:
-                half = otio.opentime.RationalTime(trans[1] / 2 * fps, fps)
+            before = joins[i - 1] if i else 0
+            after = joins[i] if i < len(segs) - 1 else 0
+            if before:
+                half = otio.opentime.RationalTime(before / 2 * fps, fps)
                 track.append(otio.schema.Transition(
                     transition_type=otio.schema.TransitionTypes.SMPTE_Dissolve, in_offset=half, out_offset=half))
             # OTIO dissolves eat into neighbouring clips' handles instead of overlapping them, so
             # shorten each clip by d/2 at every transition to match the rendered duration
-            if trans:
-                a += trans[1] / 2 if i > 0 else 0
-                b -= trans[1] / 2 if i < len(segs) - 1 else 0
+            a += before / 2
+            b -= after / 2
             rng = otio.opentime.TimeRange(otio.opentime.RationalTime(round(a * fps), fps),
                                           otio.opentime.RationalTime(round((b - a) * fps), fps))
             track.append(otio.schema.Clip(name=f"seg{i + 1}", media_reference=ref.clone(), source_range=rng))
