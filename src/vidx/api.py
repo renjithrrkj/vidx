@@ -143,6 +143,13 @@ def describe_version(version_id) -> str:
         opts.append(f"speed {tl['speed']}")
     if any((c.get("grade") or {}).get("match") for c in tl.get("clips") or []):
         opts.append("colour match")
+    clips = tl.get("clips") or []
+    stills = sum(1 for c in clips if c.get("image"))
+    layers = {o["asset"] for c in clips for o in c.get("overlays") or []}
+    if stills:
+        opts.append(f"{stills} still(s)")
+    if layers:
+        opts.append(f"{len(layers)} overlay image(s)")
     if tl.get("audio"):
         opts.append(f"{len(tl['audio'])} audio cue(s)")
     used = Counter((c["transition"].get("type", "dissolve") if c.get("transition") else "hard")
@@ -152,8 +159,8 @@ def describe_version(version_id) -> str:
     lines = [f"v{ver['id']}" + (f" (from v{ver['parent_id']})" if ver["parent_id"] else "")
              + f": {len(segs)} segments, out {mmss(tl['out_duration'])} ({tl['out_duration']:.1f}s, "
              + f"{delta:+.1f}s vs source)" + (" | " + ", ".join(opts) if opts else "")]
-    show = segs[:8]
-    lines.append("segs: " + ", ".join(f"{a:.1f}-{b:.1f}" for a, b in show)
+    named = [f"still {c['for']:g}s" if c.get("image") else None for c in clips] if len(clips) == len(segs) else [None] * len(segs)
+    lines.append("segs: " + ", ".join(n or f"{a:.1f}-{b:.1f}" for (a, b), n in zip(segs[:8], named))
                  + (f", … (+{len(segs) - 8})" if len(segs) > 8 else ""))
     for w in tl.get("warnings", [])[:5]:
         lines.append(f"warn: {w}")

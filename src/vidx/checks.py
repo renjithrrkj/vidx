@@ -6,7 +6,7 @@ import subprocess
 
 from . import store, util
 from .analyzers.audio import detect_cmd, parse_detect_log
-from .dsl import acoustic_words, out_to_src, src_to_out
+from .dsl import acoustic_words, out_positions, out_to_src, src_to_out
 from .render import PRESETS, frame_snap
 from .store import VidxError, Word
 
@@ -85,8 +85,19 @@ def check(version_id: str) -> str:
     src_freezes = store.get_events(v.id, "freeze")
     src_blacks = store.get_events(v.id, "black")
 
+    clips = tl.get("clips") or []
+    spans = out_positions(segs, speed, trans) if len(clips) == len(segs) else []
+    stills = [p for c, p in zip(clips, spans) if c.get("image")]
+
+    def in_still(e) -> bool:  # a still holds on purpose; its times aren't source times either
+        return any(a - 0.3 <= e.start and e.end <= b + 0.3 for a, b in stills)
+
     issues: list[str] = []
     for e in events:
+        if in_still(e):
+            if e.kind == "black":
+                issues.append(f"black {util.rng(e.start, e.end)} inside a still -> check that image")
+            continue
         if e.kind == "black":
             s = out_to_src((e.start + e.end) / 2, segs, speed, trans)
             in_src = s is not None and any(b.start - 0.1 <= s <= b.end + 0.1 for b in src_blacks)

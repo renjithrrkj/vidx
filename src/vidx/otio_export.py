@@ -9,12 +9,16 @@ def export(timeline: dict, src_path: str, out_path: Path, name: str) -> Path | N
         import opentimelineio as otio
     except ImportError:
         return None
+    from . import store
     from .render import frame_snap
 
     fps = float(timeline["fps"])
     segs = frame_snap(timeline["segments"], fps)
     joins = timeline.get("joins") or [(timeline.get("trans") or [None, 0])[1]] * (len(segs) - 1)
-    ref = otio.schema.ExternalReference(target_url=Path(src_path).resolve().as_uri())
+    clips = timeline.get("clips") or []
+    clips = clips if len(clips) == len(segs) else [{}] * len(segs)
+    refs = [otio.schema.ExternalReference(target_url=Path(store.get_video(c["video"]).path if c.get("video") else src_path).resolve().as_uri())
+            for c in clips]  # each clip points at its own file: stills and other videos included
     tl = otio.schema.Timeline(name=name)
     tl.global_start_time = otio.opentime.RationalTime(0, fps)
     for kind in (otio.schema.TrackKind.Video, otio.schema.TrackKind.Audio):
@@ -32,12 +36,18 @@ def export(timeline: dict, src_path: str, out_path: Path, name: str) -> Path | N
             b -= after / 2
             rng = otio.opentime.TimeRange(otio.opentime.RationalTime(round(a * fps), fps),
                                           otio.opentime.RationalTime(round((b - a) * fps), fps))
-            track.append(otio.schema.Clip(name=f"seg{i + 1}", media_reference=ref.clone(), source_range=rng))
+            if kind == otio.schema.TrackKind.Audio and clips[i].get("image"):
+                track.append(otio.schema.Gap(source_range=rng))  # a still has no sound
+            else:
+                track.append(otio.schema.Clip(name=f"seg{i + 1}", media_reference=refs[i].clone(), source_range=rng))
         tl.tracks.append(track)
     if abs((timeline.get("speed") or 1) - 1) > 1e-3:
         tl.metadata["vidx"] = {"speed": timeline["speed"], "note": "global speed not encoded as clip effects"}
     if timeline.get("crop"):
         tl.metadata.setdefault("vidx", {})["crop"] = timeline["crop"]
+    layers = sum(len(c.get("overlays") or []) for c in clips)
+    if layers:
+        tl.metadata.setdefault("vidx", {})["overlays"] = {"count": layers, "note": "image overlays are in the render, not this file"}
     out_path = out_path.with_suffix(".otio")
     otio.adapters.write_to_file(tl, str(out_path))
     return out_path

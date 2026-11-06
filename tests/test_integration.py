@@ -130,5 +130,16 @@ def test_end_to_end(env):
     packed = api.edit(vid, "drop 5-6\ndrop 11-12\ndrop 17-18\ncuts comedy")
     assert packed.startswith("v"), packed
 
+    # stills and image layers on an indexed video, through the same render, check and review steps
+    from PIL import Image
+
+    photo = env.parent / "photo.png"
+    Image.new("RGB", (800, 600), (200, 40, 40)).save(photo)
+    ver6 = api.edit(vid, f"base none\nkeep 1-5\nkeep 9-13\nstill {photo} 2 at 4 motion zoom_in\n"
+                         f"overlay {photo} 1 3 pos top_right width 0.2 fade 0.2\ncuts documentary 2").split(":")[0].split()[0]
+    assert "encoded" in api.render(ver6, preset="reel_9x16", preview=True)
+    assert "freeze 4" not in api.check(ver6)
+    assert api.peek(ver6, ["cuts"])[0]
+
     imgs, cap = api.peek(ver4, ["cuts"])
     assert len(imgs) == 1 and imgs[0][:2] == b"\xff\xd8" and "2 cuts" in cap

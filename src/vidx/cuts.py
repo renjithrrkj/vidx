@@ -104,6 +104,8 @@ class JoinInfo:
 def join_info(a: dict, b: dict, ctx) -> JoinInfo:
     """What is happening at the join between clips a and b. Missing analysis just means less to go on."""
     info = JoinInfo()
+    if a.get("image") or b.get("image"):  # a still's times aren't times in the analysed video
+        return info
     fps = float(ctx.fps)
     same = a.get("video") == b.get("video")
     if same:

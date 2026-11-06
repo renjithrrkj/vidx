@@ -96,3 +96,21 @@ Choices made where the spec left room, or where reality differed from it.
 - **Scores are grouped by labelled range** in cross-validation, because neighbouring seconds are near-duplicates and a random split would flatter the detector.
 - Trained detectors stay in `~/.vidx/detectors`, and need no new MCP tool: `query` runs one the first time its name is asked for.
 - First real test, `night_rain` on one film: found the unseen night scenes and nothing in two other videos, but also fired on a dark end card until that was added as a negative. One concept, one film, so not a general accuracy claim.
+
+## Stills and image layers
+
+- A still is a clip, not a special case. It's stored as its own silent source (`img<hash>`), so transitions, captions, the
+  piece cache and `check` needed almost no new code. `vidx list` hides these rows.
+- `prepare_image` keeps vidx's own PNG copy in `~/.vidx/images`, named by content hash: phone photos come out upright
+  (ffmpeg ignores EXIF rotation), the long side is capped at 3840, an edit keeps rendering if the original moves, and
+  swapping a picture at the same path can't be served from the cache.
+- Movement runs through zoompan at 2x output size, because zoompan lands on whole pixels. A test tracks an edge frame by
+  frame and fails if it ever moves backward.
+- A layer that spans several clips is copied onto each with the same length and a negative `at`, so fades happen only at
+  its real ends. `overlay_window` limits each piece to the part it needs, so a whole-edit logo doesn't cost its full
+  length in every piece.
+- `still ... at T` means T in the edit without stills, so adding one still doesn't move the others. Captions and overlays
+  use final output time, which is what you see in the render.
+- Not done: video overlays (picture-in-picture), exit animations for layers, and exporting layers to OTIO (the render has
+  them; the .otio file only notes how many).
+
