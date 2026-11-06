@@ -1,6 +1,8 @@
 """Compare two versions: added / removed / moved source ranges + output duration delta."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import store
 from .dsl import Seg, out_positions
 from .store import VidxError
@@ -70,11 +72,29 @@ def _lis_keep(keys: list[tuple]) -> set[int]:
     return keep
 
 
+def _source_view(tl: dict) -> tuple[list[Seg], list]:
+    """Segments and output positions of the source footage. A still's 0-3s isn't 0-3s of the video."""
+    segs = [tuple(s) for s in tl["segments"]]
+    pos = out_positions(segs, tl.get("speeds") or tl.get("speed") or 1, tl.get("joins", tl.get("trans")))
+    clips = tl.get("clips") or []
+    if len(clips) != len(segs):
+        return segs, pos
+    keep = [i for i, c in enumerate(clips) if not c.get("image")]
+    return [segs[i] for i in keep], [pos[i] for i in keep]
+
+
+def _media(tl: dict) -> set[str]:
+    out = set()
+    for c in tl.get("clips") or []:
+        if c.get("image"):
+            out.add(f"still {Path(c['image']).name} {c['for']:g}s {c.get('motion', 'none')}")
+        out |= {f"overlay {Path(o['image']).name} {o['pos']}" for o in c.get("overlays") or []}
+    return out
+
+
 def diff_timelines(ta: dict, tb: dict) -> dict:
-    a = [tuple(s) for s in ta["segments"]]
-    b = [tuple(s) for s in tb["segments"]]
-    pa = out_positions(a, ta.get("speeds") or ta.get("speed") or 1, ta.get("joins", ta.get("trans")))
-    pb = out_positions(b, tb.get("speeds") or tb.get("speed") or 1, tb.get("joins", tb.get("trans")))
+    a, pa = _source_view(ta)
+    b, pb = _source_view(tb)
 
     sa, sb = ta.get("speed") or 1, tb.get("speed") or 1
 
@@ -99,8 +119,11 @@ def diff_timelines(ta: dict, tb: dict) -> dict:
         if va != vb:
             fmt = lambda v: "cut" if key == "trans" and not v else (f"xfade {v[1]}" if key == "trans" else str(v))
             opts.append(f"{key} {fmt(va)} -> {fmt(vb)}")
+    ma, mb = _media(ta), _media(tb)
+    opts += [f"removed {m}" for m in sorted(ma - mb)] + [f"added {m}" for m in sorted(mb - ma)]
     return {"removed": removed, "added": added, "moved": moved, "opts": opts,
-            "dur_a": ta["out_duration"], "dur_b": tb["out_duration"], "n_a": len(a), "n_b": len(b)}
+            "dur_a": ta["out_duration"], "dur_b": tb["out_duration"],
+            "n_a": len(ta["segments"]), "n_b": len(tb["segments"])}
 
 
 def diff(version_a: str, version_b: str) -> str:
