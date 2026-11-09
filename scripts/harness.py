@@ -39,12 +39,15 @@ MAX_FILE_BYTES = 2_000_000
 PROTECTED = ("scripts/gate.py", "scripts/harness.py", "tests/test_harness.py", "CLAUDE.md", ".claude/", ".github/")
 PRIVATE_TEXT = re.compile(r"/Users/|/private/tmp|\.vidx-harness|[\w.+-]+@gmail\.com")
 MEDIA_FILE = re.compile(r"\.(mov|mp4|mkv|avi|m4a|wav|mp3|jpg|jpeg|png)$", re.I)
-WEAKENED_TEST = re.compile(r"^\+.*(pytest\.mark\.(skip|xfail)|pytest\.skip\(|pytest\.xfail\()", re.M)
+# skipif is fine (it guards tests that need ffmpeg); an unconditional skip or xfail is not.
+WEAKENED_TEST = re.compile(r"^\+.*(pytest\.mark\.(skip|xfail)\b|pytest\.skip\(|pytest\.xfail\(|skipif\(\s*True)", re.M)
 
 BUILDER_TOOLS = ",".join([
     "Read", "Edit", "Write", "Glob", "Grep",
-    "Bash(uv run pytest:*)", "Bash(python3 scripts/gate.py --fast)", "Bash(git status:*)", "Bash(git diff:*)",
+    "Bash(uv run pytest:*)", "Bash(python3 scripts/gate.py --fast:*)", "Bash(git status:*)", "Bash(git diff:*)",
     "Bash(git log:*)", "Bash(ffprobe:*)", "Bash(ffmpeg:*)", "Bash(uv run vidx:*)", "Bash(uv run python:*)",
+    "Bash(uv run python3:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+    "Bash(which:*)",
 ])
 REVIEWER_TOOLS = "Read,Glob,Grep"
 REVIEW_SCHEMA = json.dumps({
@@ -214,8 +217,14 @@ def work_issue(number: int, run: Run) -> str:
     issue = load_issue(number)
     allow_drift = any(x["name"] == "baseline-change" for x in issue["labels"])
     branch, work = f"issue-{number}", HOME / "work" / f"issue-{number}"
-    git("worktree", "add", "-B", branch, str(work), "origin/main")
     feedback = ""
+    if unfinished(branch):
+        git("worktree", "add", str(work), branch)
+        feedback = "A previous run left this work unfinished. Continue from it.\n" + previous_feedback(number, run)
+        run.log("resuming unfinished work from the last run")
+    else:
+        git("worktree", "add", "-B", branch, str(work), "origin/main")
+    finished = False
     try:
         for attempt in range(1, ATTEMPTS + 1):
             run.log(f"attempt {attempt}: building")
@@ -249,11 +258,43 @@ def work_issue(number: int, run: Run) -> str:
                 feedback = "\n".join(verdict.get("findings") or ["The review gave no usable answer."])
                 run.log(f"attempt {attempt}: review failed")
                 continue
-            return open_pull_request(issue, branch, work, summary, card.read_text(), verdict, run)
+            url = open_pull_request(issue, branch, work, summary, card.read_text(), verdict, run)
+            finished = True
+            return url
         (run.dir / "last-feedback.txt").write_text(feedback)
         raise Stop(f"still failing after {ATTEMPTS} attempts")
     finally:
+        if not finished:
+            keep_unfinished(work, run)
         subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=ROOT, capture_output=True)
+
+
+def unfinished(branch: str) -> bool:
+    """A local branch from an earlier stopped run that has work main doesn't."""
+    try:
+        return int(git("rev-list", "--count", f"origin/main..{branch}").strip()) > 0
+    except subprocess.CalledProcessError:
+        return False
+
+
+def keep_unfinished(work: Path, run: Run) -> None:
+    """Commit what was built to the local branch only. Nothing is pushed."""
+    try:
+        git("add", "-A", cwd=work)
+        if git("diff", "--cached", "--name-only", cwd=work).strip():
+            git("commit", "-q", "-m", "Unfinished harness attempt", cwd=work)
+            run.log("kept the unfinished work on the local branch")
+    except subprocess.CalledProcessError:
+        run.log("could not keep the unfinished work")
+
+
+def previous_feedback(number: int, run: Run) -> str:
+    runs = sorted(p for p in (HOME / "runs").glob(f"issue-{number}-*") if p != run.dir)
+    for p in reversed(runs):
+        f = p / "last-feedback.txt"
+        if f.exists():
+            return "Problems found last time:\n" + f.read_text()
+    return ""
 
 
 def open_pull_request(issue: dict, branch: str, work: Path, summary: str, card: str, verdict: dict, run: Run) -> str:
