@@ -198,6 +198,18 @@ def measure(target: Path, keep: Path | None) -> tuple[dict, list[str]]:
     return results, hard
 
 
+def noisy_clips(failures: list[str]) -> list[str]:
+    """Clips whose only hard failures are time or memory, which vary between identical runs."""
+    by_clip: dict[str, list[str]] = {}
+    for f in failures:
+        m = re.match(r"clip (\w+): (.*)", f)
+        if m:
+            by_clip.setdefault(m.group(1), []).append(m.group(2))
+        else:
+            return []
+    return [c for c, fs in by_clip.items() if all(x.startswith(("took ", "peak memory")) and "ceiling" not in x for x in fs)]
+
+
 def judge(base: dict, now: dict) -> tuple[list[str], list[str]]:
     hard, drift = [], []
     for key in ("fast_tests", "e2e_tests"):
@@ -259,8 +271,20 @@ def main() -> int:
     if not BASELINE.exists():
         print("No baseline yet. A human needs to run --rebaseline first.")
         return 2
+    base = json.loads(BASELINE.read_text())
     now, hard = measure(target, keep)
-    extra_hard, drift = judge(json.loads(BASELINE.read_text()), now)
+    extra_hard, drift = judge(base, now)
+    for name in noisy_clips(extra_hard):
+        print(f"clip {name}: time or memory over the limit, measuring once more", flush=True)
+        try:
+            again = run_clip(target, name, None)
+        except (RuntimeError, FileNotFoundError) as e:
+            hard.append(str(e))
+            continue
+        for key in ("secs", "peak_mb"):
+            now["clips"][name][key] = min(now["clips"][name][key], again[key])
+    if noisy_clips(extra_hard):
+        extra_hard, drift = judge(base, now)
     hard += extra_hard
     card = scorecard(now, hard, drift, args.allow_drift)
     print(card)

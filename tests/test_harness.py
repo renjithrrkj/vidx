@@ -91,6 +91,10 @@ def test_finished_changes_are_stopped_for_the_right_reasons():
     assert problems(["a.py"], "+mail = 'someone@gmail.com'")
     assert problems(["t.py"], "+@pytest.mark.skip(reason='later')")
     assert problems(["t.py"], "-p = '/Users/removed'") == []  # removing a path is fine
+    assert problems(["t.py"], "+@pytest.mark.xfail")
+    assert problems(["t.py"], "+@pytest.mark.skipif(True, reason='x')")
+    # guarding a test that needs ffmpeg is normal, and wrongly blocked the first real run
+    assert problems(["t.py"], "+needs_ffmpeg = pytest.mark.skipif(shutil.which('ffmpeg') is None, reason='no ffmpeg')") == []
 
 
 CLIP = {"size": [1080, 1920], "length": 30.0, "tokens": 1000, "check_issues": 0, "loudness": -16.0, "secs": 60.0,
@@ -141,3 +145,17 @@ def test_scorecard_is_safe_to_post():
     assert "FAILED" in card and not harness.PRIVATE_TEXT.search(card)
     assert "PASSED" in gate.scorecard(now, [], ["clip a: length"], True)
     assert "FAILED" in gate.scorecard(now, [], ["clip a: length"], False)
+
+
+def test_only_time_and_memory_failures_get_a_second_measurement():
+    assert gate.noisy_clips(["clip a: took 90s (was 50s)", "clip b: peak memory 1741 MB (was 1105 MB)"]) == ["a", "b"]
+    assert gate.noisy_clips(["clip a: took 90s (was 50s)", "clip a: frame size [1, 1] (was [2, 2])"]) == []
+    assert gate.noisy_clips(["clip a: peak memory 3600 MB is over the 3500 MB ceiling"]) == []
+    assert gate.noisy_clips(["fast_tests failed"]) == []
+
+
+def test_builders_can_read_and_run_the_quick_gate():
+    tools = harness.BUILDER_TOOLS
+    for rule in ("Bash(python3 scripts/gate.py --fast:*)", "Bash(uv run python3:*)", "Bash(cat:*)"):
+        assert rule in tools
+    assert "git push" not in tools and "gh " not in tools
