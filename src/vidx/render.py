@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image
+
 from . import color, config, cuts, store, timeline, util
 from .store import VidxError
 
@@ -122,9 +124,9 @@ def plan_pieces(clips: list[dict], fps: float) -> list[Piece]:
 
 def output_size(tl: dict, preset: str, preview: bool) -> tuple[int, int]:
     W, H = PRESETS[preset][:2]
-    if not W:
-        c = tl["clips"][0]
-        v = store.get_video(c["video"])
+    if not W:  # a still shouldn't set the size of the whole edit
+        c = next((x for x in tl["clips"] if not x.get("image")), {})
+        v = store.get_video(c.get("video") or tl["video_id"])
         W, H = v.width, v.height
         ratio = c.get("crop") or tl.get("crop")
         if ratio:
@@ -143,7 +145,7 @@ def output_size(tl: dict, preset: str, preview: bool) -> tuple[int, int]:
 def caption_png(cache: Path, cap: dict, W: int, H: int) -> Path:
     """Full-frame transparent PNG with the caption drawn on it. Pillow, because many ffmpeg builds
     (Homebrew's included) ship without drawtext."""
-    from PIL import Image, ImageDraw
+    from PIL import ImageDraw
 
     from .thumbs import caption_font
 
@@ -173,6 +175,51 @@ def caption_png(cache: Path, cap: dict, W: int, H: int) -> Path:
         y += lh
     im.save(p)
     return p
+
+
+# ---------------------------------------------------------------- image layers (pure)
+
+
+def overlay_box(o: dict, W: int, H: int, iw: int, ih: int) -> tuple[int, int, int, int]:
+    """Where a layer sits: (width, height, x, y) in output pixels. Named spots keep a 4% margin."""
+    w = max(2, round(W * o["width"] / 2) * 2)
+    h = max(2, round(w * ih / iw / 2) * 2)
+    pos = o["pos"]
+    if not isinstance(pos, str):
+        return w, h, round(pos[0] * W), round(pos[1] * H)
+    m = round(min(W, H) * 0.04)
+    x = m if "left" in pos else W - w - m if "right" in pos else (W - w) // 2
+    y = m if "top" in pos else H - h - m if "bottom" in pos else (H - h) // 2
+    return w, h, x, y
+
+
+def overlay_window(a: float, length: float, fade: float, dur: float) -> tuple[float, float, bool, float | None]:
+    """The part of a layer that one piece needs, so a layer lasting the whole edit doesn't cost its full length in
+    every piece. a = layer start in piece time (negative: already running).
+    -> (stream start in piece time, stream length, fade in?, fade-out start in stream time or None)."""
+    fade_in = fade > 0 and a + fade > 0
+    start = a if a >= 0 or fade_in else 0.0
+    end = min(a + length, dur + 0.1)
+    fade_out = max(a + length - fade - start, 0.0) if fade > 0 and a + length - fade < dur else None
+    return start, end - start, fade_in, fade_out
+
+
+def slide_expr(x: int, y: int, w: int, h: int, W: int, H: int, motion: str, start: float, secs: float = 0.4) -> tuple[str, str]:
+    """x and y as expressions of time: the layer enters from off-frame and eases to its place."""
+    left = f"pow(1-min(max((t-({start:.3f}))/{secs},0),1),2)"  # 1 when it starts, 0 once it has arrived
+    return {"slide_left": (f"{x}+{W - x}*{left}", str(y)), "slide_right": (f"{x}-{x + w}*{left}", str(y)),
+            "slide_up": (str(x), f"{y}+{H - y}*{left}"), "slide_down": (str(x), f"{y}-{y + h}*{left}")}.get(motion, (str(x), str(y)))
+
+
+STILL_ZOOM = 1.12  # how far a still moves: enough to feel alive, little enough to keep the framing
+
+
+def still_motion(motion: str, zoom: float = 1.0) -> tuple[float, float, tuple[float, float], tuple[float, float]]:
+    """-> (zoom at start, zoom at end, (x from, x to), (y from, y to)); x/y 0-1 across the spare picture."""
+    z, c = STILL_ZOOM * zoom, (0.5, 0.5)
+    return {"zoom_in": (zoom, z, c, c), "zoom_out": (z, zoom, c, c), "pan_left": (z, z, (1.0, 0.0), c),
+            "pan_right": (z, z, (0.0, 1.0), c), "pan_up": (z, z, c, (1.0, 0.0)),
+            "pan_down": (z, z, c, (0.0, 1.0))}.get(motion, (zoom, zoom, c, c))
 
 
 # ---------------------------------------------------------------- filter chains
@@ -217,6 +264,8 @@ def grade_filters(c: dict, spec: Spec) -> list[str]:
         else:
             ra, rb = float(m["t"]) - 0.5, float(m["t"]) + 0.5
         def region(v, a, b):
+            if v.meta.get("image"):  # one picture: every sample is the same frame
+                a = b = 0.0
             active = v.meta.get("active") if PRESETS[spec.preset][0] else None
             return {"path": v.path, "a": a, "b": b, "active": active, "size": (v.width, v.height)}
 
@@ -226,8 +275,34 @@ def grade_filters(c: dict, spec: Spec) -> list[str]:
     return out
 
 
+def still_moves(c: dict) -> bool:
+    return c.get("motion", "none") != "none" or float(c.get("zoom") or 1) > 1
+
+
+def still_chain(c: dict, part: Part, spec: Spec) -> str:
+    """A still at output size. Movement goes through zoompan at twice the size, because zoompan lands on whole
+    pixels and a slow move at 1x visibly shakes."""
+    W, H = spec.W, spec.H
+    ss = 2 if max(W, H) <= 1920 else 1
+    moves = still_moves(c)
+    sw, sh = (W * ss, H * ss) if moves else (W, H)
+    if c.get("fit") == "contain":
+        f = [f"scale={sw}:{sh}:force_original_aspect_ratio=decrease,pad={sw}:{sh}:(ow-iw)/2:(oh-ih)/2:black"]
+    else:
+        f = [f"scale={sw}:{sh}:force_original_aspect_ratio=increase,crop={sw}:{sh}"]
+    if moves:
+        z0, z1, (x0, x1), (y0, y1) = still_motion(c.get("motion", "none"), float(c.get("zoom") or 1))
+        total = max(round(timeline.out_length(c) * spec.fps) - 1, 1)
+        p = f"((on+{round(part.offset * spec.fps)})/{total})"  # share of the whole clip, so a move runs through joins
+        f.append(f"zoompan=z='{z0:.4f}+{z1 - z0:.4f}*{p}':x='(iw-iw/zoom)*({x0}+{x1 - x0}*{p})':"
+                 f"y='(ih-ih/zoom)*({y0}+{y1 - y0}*{p})':d={part.frames + 2}:s={W}x{H}:fps={spec.fps:g}")
+    return ",".join(f + grade_filters(c, spec) + [f"fps={spec.fps:g}", "setsar=1", "settb=AVTB"])
+
+
 def video_chain(c: dict, part: Part, spec: Spec, tl: dict) -> str:
     v = spec.video(c["video"])
+    if v.meta.get("image"):
+        return still_chain(c, part, spec)
     sp = float(c.get("speed") or 1.0)
     f = [f"setpts=(PTS-STARTPTS)/{sp:.4f}", f"fps={spec.fps:g}"]
     sw, sh = v.width, v.height
@@ -266,7 +341,12 @@ def piece_inputs_and_graph(piece: Piece, tl: dict, spec: Spec) -> tuple[list[str
     for pi, part in enumerate(piece.parts):
         c = tl["clips"][part.clip]
         v = spec.video(c["video"])
-        args += ["-ss", f"{part.a:.6f}", "-t", f"{part.b - part.a + 0.25:.6f}", "-i", v.path]
+        if not v.meta.get("image"):
+            args += ["-ss", f"{part.a:.6f}", "-t", f"{part.b - part.a + 0.25:.6f}", "-i", v.path]
+        elif still_moves(c):
+            args += ["-i", v.path]  # zoompan makes the frames from the one picture
+        else:
+            args += ["-loop", "1", "-framerate", f"{spec.fps:g}", "-t", f"{piece.frames / spec.fps + 0.25:.6f}", "-i", v.path]
         vin = n_in
         n_in += 1
         vc = video_chain(c, part, spec, tl)
@@ -274,6 +354,34 @@ def piece_inputs_and_graph(piece: Piece, tl: dict, spec: Spec) -> tuple[list[str
         lv = f"v{pi}"
         g.append(f"[{vin}:v:0]{vc}[{lv}raw]")
         cur = f"{lv}raw"
+        layers = []
+        for k, o in enumerate(c.get("overlays") or []):  # under the captions, so text stays readable
+            a = float(o["at"]) - part.offset
+            length = float(o["for"])
+            if a + length <= 0 or a >= dur:
+                continue
+            start, span, fade_in, fade_out = overlay_window(a, length, float(o["fade"]), dur)
+            png = timeline.prepare_image(o["image"], o["asset"], "overlay")[1]
+            with Image.open(png) as im:
+                w, h, x, y = overlay_box(o, spec.W, spec.H, *im.size)
+            f = [f"scale={w}:{h}:flags=lanczos", "format=rgba"]
+            if float(o["opacity"]) < 1:
+                f.append(f"colorchannelmixer=aa={float(o['opacity']):.3f}")
+            if fade_in:
+                f.append(f"fade=t=in:st=0:d={float(o['fade']):.3f}:alpha=1")
+            if fade_out is not None:
+                f.append(f"fade=t=out:st={fade_out:.3f}:d={float(o['fade']):.3f}:alpha=1")
+            if start < 0:
+                f += [f"trim=start={-start:.4f}", "setpts=PTS-STARTPTS"]
+            elif start > 0:
+                f.append(f"setpts=PTS+{start:.4f}/TB")
+            ex, ey = slide_expr(x, y, w, h, spec.W, spec.H, o["motion"], a)
+            args += ["-loop", "1", "-framerate", f"{spec.fps:g}", "-t", f"{span + 0.05:.4f}", "-i", str(png)]
+            g.append(f"[{n_in}:v]{','.join(f)}[{lv}l{k}]")
+            g.append(f"[{cur}][{lv}l{k}]overlay=x='{ex}':y='{ey}':eval=frame:eof_action=pass:format=auto[{lv}o{k}]")
+            cur = f"{lv}o{k}"
+            n_in += 1
+            layers.append([o["asset"], round(a, 3), round(length, 3), w, h, x, y, o["opacity"], o["fade"], o["motion"]])
         caps = []
         for k, cap in enumerate(c.get("captions") or []):
             a = float(cap["at"]) - part.offset
@@ -316,7 +424,8 @@ def piece_inputs_and_graph(piece: Piece, tl: dict, spec: Spec) -> tuple[list[str
             g.append(f"[{n_in}:a]anull[{la}]")
             n_in += 1
         labels.append((lv, la))
-        key["parts"].append({"src": v.sha1, "a": round(part.a, 5), "b": round(part.b, 5), "v": vc, "caps": caps})
+        key["parts"].append({"src": v.sha1, "a": round(part.a, 5), "b": round(part.b, 5), "v": vc, "caps": caps,
+                             **({"layers": layers} if layers else {})})
     key["effect"] = piece.effect
     if piece.kind == "join":
         (v0, a0), (v1, a1) = labels

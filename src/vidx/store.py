@@ -143,7 +143,8 @@ def get_video(video_id: str) -> VideoInfo:
 
 
 def list_videos() -> list[VideoInfo]:
-    return [get_video(r["id"]) for r in db().execute("SELECT id FROM videos ORDER BY created_at")]
+    videos = [get_video(r["id"]) for r in db().execute("SELECT id FROM videos ORDER BY created_at")]
+    return [v for v in videos if not v.meta.get("image")]  # stills are timeline sources, not indexed videos
 
 
 def delete_video_data(video_id: str) -> None:

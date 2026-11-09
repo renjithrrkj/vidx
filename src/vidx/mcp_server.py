@@ -19,14 +19,20 @@ Times are seconds. Shots are s1..sN. Versions are v1..vN.
 DSL (one per line): base all|none; drop 30.0-31.2 | drop s7 | drop s3-s5 | drop silence>1.2 | drop black;
 keep 120-150 | keep s3 (with base none, order = output order); snap words; pad 0.15; trans xfade 0.3 | trans cut;
 crop 9:16 center; speed 1.1; match s3 0.8 (colour-match all clips to a reference shot);
-caption 3.0 2.5 Some text; sfx impact_01 at 3.2 gain -6; music drone_02 gain -18.
+caption 3.0 2.5 Some text; sfx impact_01 at 3.2 gain -6; music drone_02 gain -18;
+still /abs/photo.jpg 3.0 at 12.5 motion zoom_in fit cover (a still as a clip, at a time in the edit without stills, or
+at end; motions none zoom_in zoom_out pan_left pan_right pan_up pan_down; fit cover|contain; stills are silent, so add music);
+overlay /abs/logo.png 3.0 2.5 pos top_right width 0.2 fade 0.3 opacity 0.9 motion slide_left (an image layer at output
+time 3.0 for 2.5s, or `all` to the end; pos top_left top top_right left center right bottom_left bottom bottom_right or
+x,y as 0-1; width = share of the frame; motions none slide_left slide_right slide_up slide_down). Quote paths with spaces.
 Cuts vary the feel of an edit: "cuts hype" picks a cut per join from what is happening there (packs: clean,
 documentary, comedy, hype, trailer; add a number to reroll), "cut 3 smash" sets one join, "cut whip_left" sets all.
 Names: hard smash punch_in punch_big j_cut l_cut dissolve dissolve_slow dip_black dip_white flash whip_left whip_right
 whip_up zoom blur wipe smooth cover reveal iris radial squeeze slices wind pixel gray_fade.
 Typical clean-up: "drop silence>1.0\\nsnap words\\npad 0.1".
 For per-clip control pass a timeline instead of DSL: JSON (or @/path/file.json) with clips [{in, out, video?,
-speed?, crop?, zoom?, grade?{brightness,contrast,saturation,match}, captions?[{at,for,text,pos}], transition?{type,dur?}}]
+speed?, crop?, zoom?, grade?{brightness,contrast,saturation,match}, captions?[{at,for,text,pos}],
+overlays?[{image,at,for,pos,width,opacity,fade,motion}], transition?{type,dur?}}, or a still {image,for,motion,fit,...}]
 and audio [{sfx|music|file, at?, gain?}]. Every edit writes its timeline file; change that file and pass it back.
 Rendering caches each clip, so changing one shot re-encodes only that shot. Use render(preview=true) while iterating,
 then peek(version, ["cuts"]) to review every cut in one image.

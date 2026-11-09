@@ -10,6 +10,10 @@
     speed 1.25
     match s3 0.8                      colour-match every clip to shot s3 (or a time), strength 0-1
     caption 3.0 2.5 Some text         burn in text at output time 3.0 for 2.5s
+    still photo.jpg 3.0 at 12.5 motion zoom_in fit cover
+                                      a still as a clip, placed at 12.5 of the edit without stills (or at end)
+    overlay logo.png 3.0 2.5 pos top_right width 0.2 fade 0.3 opacity 0.9 motion slide_left
+                                      an image layer at output time 3.0 for 2.5s (`all` = to the end of the edit)
     sfx impact_01 at 3.2 gain -6      bundled sound at output time 3.2
     music drone_02 gain -18           bundled bed under the whole edit
     cuts hype                         a style pack picks a cut for each join (seed optional: cuts hype 7)
@@ -21,6 +25,7 @@ Times accept seconds (12.5) or mm:ss.s (1:02.5).
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass, field
 
 from .store import VidxError, Word
@@ -54,6 +59,8 @@ class Script:
     speed: float = 1.0
     match: tuple[str, float] | None = None
     captions: list = field(default_factory=list)
+    stills: list = field(default_factory=list)
+    overlays: list = field(default_factory=list)
     audio: list = field(default_factory=list)
     cut_all: str | None = None
     cut_at: dict = field(default_factory=dict)
@@ -158,6 +165,34 @@ def parse(text: str, src: str = "", sc: Script | None = None) -> Script:
             if len(args) < 3:
                 raise err('caption takes time, duration, text: caption 3.0 2.5 Hello there')
             sc.captions.append({"at": parse_time(args[0], n), "for": parse_time(args[1], n), "text": " ".join(args[2:])})
+        elif cmd in ("still", "overlay"):
+            try:
+                toks = shlex.split(line)[1:]  # quotes, for paths with spaces
+            except ValueError:
+                raise err(f"{cmd}: unmatched quote")
+            head = 2 if cmd == "still" else 3
+            allowed = {"at", "motion", "fit"} if cmd == "still" else {"pos", "width", "fade", "opacity", "motion"}
+            opts = dict(zip(toks[head::2], toks[head + 1::2]))
+            if len(toks) < head or (len(toks) - head) % 2 or set(opts) - allowed:
+                raise err("still takes file, seconds, then at/motion/fit: still photo.jpg 3.0 at 12.5 motion zoom_in" if cmd == "still"
+                          else "overlay takes file, time, seconds or all, then pos/width/fade/opacity/motion: "
+                               "overlay logo.png 3.0 2.5 pos top_right width 0.2")
+            if cmd == "still":
+                at = opts.pop("at", "0")
+                sc.stills.append({"image": toks[0], "for": parse_time(toks[1], n),
+                                  "at": float("inf") if at == "end" else parse_time(at, n), **opts})
+            else:
+                if "pos" in opts and "," in opts["pos"]:
+                    try:
+                        opts["pos"] = [float(p) for p in opts["pos"].split(",")]
+                    except ValueError:
+                        raise err("overlay pos is a name or x,y as 0-1 of the frame")
+                try:
+                    nums = {k: float(opts[k]) for k in ("width", "fade", "opacity") if k in opts}
+                except ValueError:
+                    raise err("overlay width, fade and opacity are numbers")
+                sc.overlays.append({**opts, **nums, "image": toks[0], "at": parse_time(toks[1], n),
+                                    "for": None if toks[2] == "all" else parse_time(toks[2], n)})
         elif cmd in ("sfx", "music"):
             opts = dict(zip(args[1::2], args[2::2]))
             if not args or len(args) % 2 == 0 or set(opts) - {"at", "gain"}:
@@ -167,7 +202,7 @@ def parse(text: str, src: str = "", sc: Script | None = None) -> Script:
                 entry["at"] = parse_time(opts.get("at", "0"), n)
             sc.audio.append(entry)
         else:
-            raise err(f"unknown command {cmd!r} (base, drop, keep, snap, pad, trans, crop, speed, match, caption, sfx, music, cuts, cut)")
+            raise err(f"unknown command {cmd!r} (base, drop, keep, snap, pad, trans, crop, speed, match, caption, still, overlay, sfx, music, cuts, cut)")
     return sc
 
 
@@ -459,19 +494,59 @@ def build_clips(segs: list[Seg], sc: Script, trans, ctx) -> list[dict]:
             c["crop"] = sc.crop
         if grade:
             c["grade"] = grade
-        if trans and i < len(segs) - 1:
-            c["transition"] = {"type": "dissolve", "dur": trans[1]}
         clips.append(c)
+    if sc.stills:
+        clips = insert_stills(clips, sc.stills, trans, grade, ctx.fps)
+    if trans:
+        for c in clips[:-1]:
+            c["transition"] = {"type": "dissolve", "dur": trans[1]}
     if sc.pack or sc.cut_all or sc.cut_at:
         from . import cuts
 
         pack, seed = sc.pack or (None, None)
         cuts.apply(clips, sc.cut_all, sc.cut_at, pack, seed, ctx)
-    pos = out_positions(segs, sc.speed, trans)
+    from .timeline import joins_of, overlay
+
+    pos = out_positions([(c["in"], c["out"]) for c in clips], [c["speed"] for c in clips], joins_of(clips))
     for cap in sc.captions:  # output time -> the clip showing at that moment
         k = next((i for i, (o0, o1) in enumerate(pos) if o0 <= cap["at"] < o1), len(pos) - 1)
         clips[k].setdefault("captions", []).append({**cap, "at": round(cap["at"] - pos[k][0], 3)})
+    total = pos[-1][1]
+    for n, ov in enumerate(sc.overlays, 1):
+        if ov["at"] >= total:
+            raise VidxError(f"overlay {n}: starts at {ov['at']:.1f}, but the edit ends at {total:.1f}")
+        length = ov["for"] if ov["for"] is not None else total - ov["at"]
+        o = overlay({**ov, "for": length}, f"overlay {n}")
+        for k, (o0, o1) in enumerate(pos):  # every clip it touches gets the same layer, so fades happen only at its ends
+            if o["at"] < o1 and o["at"] + length > o0:
+                clips[k].setdefault("overlays", []).append({**o, "at": round(o["at"] - o0, 3)})
     return clips
+
+
+def insert_stills(clips: list[dict], stills: list[dict], trans, grade: dict, fps: float) -> list[dict]:
+    """Place each still at its time in the edit without stills, splitting the clip it lands in. Working from the
+    last still back keeps the earlier times valid; stills sharing a time keep their script order."""
+    from .timeline import still
+
+    out = list(clips)
+    for n, s in sorted(enumerate(stills, 1), key=lambda x: (x[1]["at"], x[0]), reverse=True):
+        clip = still({k: v for k, v in s.items() if k != "at"}, f"still {n}", fps)
+        if grade:
+            clip["grade"] = grade
+        pos = out_positions([(c["in"], c["out"]) for c in out], [c["speed"] for c in out], trans)
+        k = next((i for i, (_, o1) in enumerate(pos) if s["at"] < o1), None)
+        if k is None:
+            out.append(clip)
+            continue
+        c, (o0, o1) = out[k], pos[k]
+        if s["at"] - o0 < MERGE_GAP:
+            out.insert(k, clip)
+        elif o1 - s["at"] < MERGE_GAP:
+            out.insert(k + 1, clip)
+        else:
+            cut = round(c["in"] + (s["at"] - o0) * c["speed"], 3)
+            out[k: k + 1] = [{**c, "out": cut}, clip, {**c, "in": cut}]
+    return out
 
 
 class IndexCtx:

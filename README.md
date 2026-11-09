@@ -93,12 +93,28 @@ crop 9:16 center
 speed 1.1
 match s3 0.8          # colour-match every clip to shot s3 (or a time), strength 0-1
 caption 3.0 2.5 Some text           # output time, duration, text
+still photo.jpg 3.0 at 12.5 motion zoom_in fit cover   # a still as a clip; `at end` also works
+overlay logo.png 3.0 2.5 pos top_right width 0.2 fade 0.3 motion slide_left   # image layer; `all` = to the end
 sfx impact_01 at 3.2 gain -6        # bundled sound at output time 3.2
 music drone_02 gain -18             # bundled bed under the whole edit
 ```
 
 Typical dead-air cleanup: `drop silence>1.0` / `snap words` / `pad 0.1`.
 `edit(..., parent_version="v3")` appends to v3's script, so fixes from `check` are one-liners.
+
+## Images
+
+A **still** is a clip: transitions, captions and `check` treat it like footage. It has no sound, so add `music` under it.
+Motions: `none zoom_in zoom_out pan_left pan_right pan_up pan_down`. `fit cover` fills the frame, `fit contain` shows the
+whole picture with bars. `at` is a time in the edit without stills, so adding one doesn't move the others.
+
+An **overlay** is an image on top of the picture and under captions. Transparent PNGs stay transparent, and a layer can
+span cuts and transitions. `pos` is `top_left top top_right left center right bottom_left bottom bottom_right` or `x,y` as
+0-1 of the frame, `width` is a share of the frame, and `motion` is `none slide_left slide_right slide_up slide_down`.
+
+Anything Pillow reads works (jpg, png, webp). Quote paths with spaces. vidx keeps an upright copy in `~/.vidx/images`, so
+phone photos aren't sideways and an edit still renders if the original moves. In a timeline file, use
+`{"image": "/path/photo.jpg", "for": 3, "motion": "zoom_in"}` as a clip, and `"overlays": [...]` on any clip.
 
 ## Cuts
 
