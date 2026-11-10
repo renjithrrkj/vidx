@@ -69,7 +69,7 @@ Tested on macOS (Apple silicon). Linux should work (CPU/CUDA); Windows is untest
 |---|---|
 | `index_video(path, force, captions, glitch)` | video_id, duration, shots, language, short summary |
 | `overview(video_id, level, limit, offset)` | table of contents (scenes cover the whole video in ≤limit lines) |
-| `query(video_id, text, kind, limit)` | ranked time ranges: speech / visual (CLIP) / on-screen text / event (`silence>1.5`, `music`, `sfx`, `beat`, `laugh`, `glitch`) |
+| `query(video_id, text, kind, limit)` | ranked time ranges: speech / visual (CLIP) / on-screen text / event (`silence>1.5`, `music`, `sfx`, `beat`, `laugh`, `glitch`, `unclear`) |
 | `get_segment(video_id, start, end, fields)` | words, events, shots for one range (`wordtimes` = per-word stamps; `detail` = motion curve and peak, colour, audio level, keyframes, text boxes) |
 | `peek(target, times, size, grid)` | **image**: one contact sheet, ≤4×4 labeled tiles. `times=["cuts"]` on a version = both sides of every cut + a colour strip of all clips |
 | `edit(video_id, dsl, parent_version)` | DSL or a JSON timeline; version id, segment count, output duration, warnings, timeline file path |
@@ -213,6 +213,12 @@ takes ~3 min, a 54 s reel ~10 s.
 
 Malayalam and other languages that Whisper-small transcribes badly are indexed as an **English
 translation** (flagged in the summary). Set `VIDX_WHISPER_MODEL=large-v3` for native-script transcripts.
+
+A false start followed by a retake can get merged by whisper into one segment, leaving several seconds
+of real speech with no words and one word stretched across the gap. vidx re-transcribes stretches like
+that on their own and folds in whatever it finds. Seconds recovered this way show in the summary, and
+seconds still wordless after the retry are indexed as an `unclear` event so `query(video_id, 'unclear')`
+finds them instead of an agent reading them as safe to cut.
 
 ## Config (env vars)
 
