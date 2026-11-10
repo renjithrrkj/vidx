@@ -96,6 +96,12 @@ SPEECH_FRAC = 0.5        # fraction of a gap's frames that must be VAD-speech to
 MAX_S_PER_CHAR = 0.5     # implausible-word bound: even slow, deliberate speech is well under this
 MIN_IMPLAUSIBLE_S = 1.2  # never flag a short word just for being brief
 PAD_S = 0.3              # padding added on each side before re-transcribing a span
+MAX_SPAN_S = 60.0        # hard cap on one suspect span. A real merged retake is a few seconds; but
+                         # if the first pass's degenerate() drops almost everything (wrong/weak-
+                         # language detection), word_gaps() can return one gap spanning nearly the
+                         # whole file, and if VAD calls that stretch speech-like, "the suspect span"
+                         # would otherwise be "the whole video". Capping keeps every re-transcribe
+                         # call bounded regardless of how bad the first pass was (see DECISIONS.md).
 
 
 def word_gaps(words: list[Word], duration: float) -> list[tuple[float, float]]:
@@ -124,13 +130,16 @@ def _speech_frac_in(speech: np.ndarray, hop: float, a: float, b: float) -> float
 
 
 def suspect_spans(words: list[Word], speech: np.ndarray, hop: float, duration: float,
-                   gap_min: float = GAP_MIN_S, speech_frac: float = SPEECH_FRAC) -> list[tuple[float, float]]:
+                   gap_min: float = GAP_MIN_S, speech_frac: float = SPEECH_FRAC,
+                   max_span: float = MAX_SPAN_S) -> list[tuple[float, float]]:
     """Stretches worth transcribing again: a long wordless gap VAD says is real speech, or a word
     stretched implausibly long (a merged false-start + retake). `speech` is a per-`hop` bool mask
     (see `speech_profile`), not raw energy: background music or room tone during a pause has
     plenty of energy but isn't speech, and must never be flagged. No padding here; that's added
     only when a span is actually re-transcribed, so this stays easy to test against made-up word
-    lists and speech masks."""
+    lists and speech masks. Spans longer than `max_span` are split into contiguous `max_span`-sized
+    pieces -- a degenerate first pass can leave one wordless gap covering nearly the whole file,
+    and that must never become one unbounded re-transcribe."""
     spans = [(a, b) for a, b in word_gaps(words, duration)
               if b - a >= gap_min and _speech_frac_in(speech, hop, a, b) >= speech_frac]
     spans += [(w.start, w.end) for w in implausible_words(words)]
@@ -141,7 +150,14 @@ def suspect_spans(words: list[Word], speech: np.ndarray, hop: float, duration: f
             merged[-1] = (merged[-1][0], max(merged[-1][1], b))
         else:
             merged.append((a, b))
-    return merged
+    capped: list[tuple[float, float]] = []
+    for a, b in merged:
+        t = a
+        while b - t > max_span:
+            capped.append((t, t + max_span))
+            t += max_span
+        capped.append((t, b))
+    return capped
 
 
 def merge_recovered(words: list[Word], span: tuple[float, float], recovered: list[Word]) -> list[Word]:
@@ -206,10 +222,12 @@ def _uncovered(words: list[Word], a: float, b: float) -> list[tuple[float, float
 
 def recover_suspect_spans(reader, words: list[Word], spans: list[tuple[float, float]], transcribe,
                            pad: float = PAD_S) -> tuple[list[Word], list[Event], float, float]:
-    """Re-run `transcribe` (span-relative samples -> span-relative Words) on each suspect span, with
-    a little padding so a word isn't clipped at the edge. Merges recovered words into `words` by
-    time, without duplicating what's already there. Only the part of a span actually covered by a
-    word counts as recovered; whatever sub-range is still wordless after the retry becomes its own
+    """Re-run `transcribe` (chunk-relative samples -> chunk-relative Words) on each suspect span, with
+    a little padding so a word isn't clipped at the edge. A span longer than `CHUNK_S` is itself
+    read and transcribed in `chunk_bounds`-sized pieces, never in one call, so memory stays flat
+    even if a span is as long as `MAX_SPAN_S` allows. Merges recovered words into `words` by time,
+    without duplicating what's already there. Only the part of a span actually covered by a word
+    counts as recovered; whatever sub-range is still wordless after the retry becomes its own
     `unclear` event, even if the rest of the span was recovered. Returns (new words, unclear
     events, seconds recovered, seconds still unclear)."""
     out = list(words)
@@ -217,7 +235,13 @@ def recover_suspect_spans(reader, words: list[Word], spans: list[tuple[float, fl
     recovered_s = unclear_s = 0.0
     for a, b in spans:
         pa, pb = max(0.0, a - pad), min(reader.duration, b + pad)
-        recovered = [Word(round(w.start + pa, 3), round(w.end + pa, 3), w.text) for w in transcribe(reader.seconds(pa, pb))]
+        # suspect_spans caps spans at MAX_SPAN_S, but pad (or a future larger cap) could still push
+        # a span past a single safe read; chunk it the same way the main pass chunks the whole file,
+        # so a long suspect span is never read or transcribed in one piece.
+        bounds = chunk_bounds(reader, size=CHUNK_S, search=SEARCH_S, start=pa, end=pb) if pb - pa > CHUNK_S else [(pa, pb)]
+        recovered: list[Word] = []
+        for c0, c1 in bounds:
+            recovered += [Word(round(w.start + c0, 3), round(w.end + c0, 3), w.text) for w in transcribe(reader.seconds(c0, c1))]
         out = merge_recovered(out, (a, b), recovered)
         gaps = _uncovered(out, a, b)
         still = sum(g1 - g0 for g0, g1 in gaps)
@@ -227,22 +251,25 @@ def recover_suspect_spans(reader, words: list[Word], spans: list[tuple[float, fl
     return out, unclear, round(recovered_s, 1), round(unclear_s, 1)
 
 
-def chunk_bounds(reader: "util.WavReader", size: float = CHUNK_S, search: float = SEARCH_S) -> list[tuple[float, float]]:
-    """Split the file into ~size-second chunks, each cut at the quietest 0.5s near the boundary
-    so a word is never split between two whisper calls."""
-    D = reader.duration
-    out, start = [], 0.0
-    while D - start > size + search:
-        lo, hi = start + size - search, start + size
+def chunk_bounds(reader: "util.WavReader", size: float = CHUNK_S, search: float = SEARCH_S,
+                  start: float = 0.0, end: float | None = None) -> list[tuple[float, float]]:
+    """Split [start, end) -- the whole file by default -- into ~size-second chunks, each cut at the
+    quietest 0.5s near the boundary so a word is never split between two whisper calls. `start`/
+    `end` let `recover_suspect_spans` reuse this to chunk a single long suspect span the same way,
+    instead of reading it into memory in one piece."""
+    D = reader.duration if end is None else end
+    out, cur = [], start
+    while D - cur > size + search:
+        lo, hi = cur + size - search, cur + size
         x = reader.seconds(lo, hi)
         hop = int(reader.sr * 0.1)
         n = len(x) // hop
         rms = np.sqrt((x[: n * hop].reshape(n, hop).astype(np.float64) ** 2).mean(1) + 1e-12)
         smooth = np.convolve(rms, np.ones(5) / 5, mode="same")  # 0.5s windows
         cut = lo + (int(np.argmin(smooth)) + 0.5) * 0.1
-        out.append((start, cut))
-        start = cut
-    out.append((start, D))
+        out.append((cur, cut))
+        cur = cut
+    out.append((cur, D))
     return out
 
 

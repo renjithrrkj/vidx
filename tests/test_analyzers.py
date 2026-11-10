@@ -194,6 +194,54 @@ def test_suspect_spans_flags_implausibly_long_word():
     assert suspect_spans(normal, speech, hop, 1.4) == []
 
 
+def test_suspect_spans_caps_a_very_long_wordless_stretch():
+    from vidx.analyzers.transcript import MAX_SPAN_S, suspect_spans
+
+    hop = 0.1
+    # a degenerate first pass can drop almost everything, leaving one wordless "gap" that covers
+    # nearly the whole file -- that must never become one unbounded suspect span
+    duration = MAX_SPAN_S * 2 + 10
+    words = [Word(0.0, 1.0, "hi")]
+    speech = np.ones(int(duration / hop) + 1, bool)
+
+    spans = suspect_spans(words, speech, hop, duration)
+    assert len(spans) > 1
+    assert all(b - a <= MAX_SPAN_S for a, b in spans)
+    assert spans[0][0] == 1.0 and spans[-1][1] == duration
+    assert all(spans[i][1] == spans[i + 1][0] for i in range(len(spans) - 1))  # contiguous, nothing lost
+
+
+def test_recover_suspect_spans_chunks_a_long_span_instead_of_one_big_read(tmp_path, monkeypatch):
+    import wave
+
+    from vidx.analyzers.transcript import recover_suspect_spans
+    from vidx.util import WavReader
+
+    # shrink the chunk size so a modest file is enough to exercise the chunking path
+    monkeypatch.setattr("vidx.analyzers.transcript.CHUNK_S", 5.0)
+    monkeypatch.setattr("vidx.analyzers.transcript.SEARCH_S", 1.0)
+
+    sr = 16000
+    duration = 14.0
+    p = tmp_path / "a.wav"
+    with wave.open(str(p), "wb") as w:
+        w.setnchannels(1), w.setsampwidth(2), w.setframerate(sr)
+        w.writeframes(np.zeros(int(sr * duration), dtype=np.int16).tobytes())
+    reader = WavReader(p)
+
+    calls = []
+    orig_seconds = reader.seconds
+
+    def spy(a, b):
+        calls.append((a, b))
+        return orig_seconds(a, b)
+    reader.seconds = spy
+
+    recover_suspect_spans(reader, [], [(0.0, duration)], lambda audio: [], pad=0.0)
+    assert len(calls) > 1  # the 14s span was never read in one call
+    assert all(b - a <= 5.0 + 1.0 + 1e-6 for a, b in calls)  # every read is chunk-sized, not span-sized
+
+
 def test_recover_suspect_spans_merges_without_duplicates_and_keeps_order():
     from vidx.analyzers.transcript import recover_suspect_spans
 
@@ -358,6 +406,47 @@ def test_transcript_run_recovers_partial_speech_and_records_remaining_unclear(tm
     unclear = store.get_events(video.id, "unclear")
     assert len(unclear) == 1 and (unclear[0].start, unclear[0].end) == (4.0, 8.5)
     assert [w.text for w in store.get_words(video.id)] == ["hi", "retake", "ok"]
+
+
+def test_transcript_run_never_reads_a_long_degenerate_gap_in_one_piece(tmp_path, monkeypatch):
+    from vidx import store
+    from vidx.analyzers import Context
+    from vidx.analyzers.transcript import MAX_SPAN_S, PAD_S, Transcript
+    from vidx.util import WavReader
+
+    _patch_store(tmp_path, monkeypatch)
+    # as if degenerate() dropped almost every segment (wrong/weak-language detection): one word,
+    # then a wordless stretch covering nearly the whole clip. Before the fix this was a single
+    # unbounded suspect span, read and transcribed in one whisper call over the whole clip.
+    duration = MAX_SPAN_S * 2 + 20
+    video, wav = _test_video(tmp_path, duration)
+
+    first_pass = [_FakeSeg([_FakeWord("hi", 0.0, 1.0)])]
+    n_spans = 3  # ceil((duration - 1.0) / MAX_SPAN_S)
+    model = _FakeModel([first_pass] + [[_FakeSeg([])] for _ in range(n_spans)])
+    monkeypatch.setattr("vidx.analyzers.transcript.load_whisper", lambda name: model)
+    monkeypatch.setattr("vidx.analyzers.transcript.speech_profile",
+                         lambda reader, hop=0.1: np.ones(int(reader.duration / hop) + 2, bool))
+
+    calls = []
+    orig_seconds = WavReader.seconds
+
+    def spy(self, a, b):
+        calls.append((a, b))
+        return orig_seconds(self, a, b)
+    monkeypatch.setattr(WavReader, "seconds", spy)
+
+    ctx = Context()
+    ctx.audio16k = lambda v: wav
+    Transcript().run(video, ctx)
+
+    # exactly one call reads anywhere near the full clip: the main pass's single chunk (the clip is
+    # shorter than CHUNK_S + SEARCH_S). The recovery pass must never repeat that for its suspect
+    # span -- each capped piece is read on its own, bounded by MAX_SPAN_S (+ padding).
+    big = [c for c in calls if c[1] - c[0] > MAX_SPAN_S + 2 * PAD_S + 1.0]
+    assert len(big) == 1
+    unclear = store.get_events(video.id, "unclear")
+    assert sum(e.end - e.start for e in unclear) > 0
 
 
 def test_audio_labels_and_beats():
