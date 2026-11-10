@@ -46,6 +46,10 @@ def summary(video_id: str, timings: dict[str, float] | None = None, total: float
         lang += " [transcript is an ENGLISH TRANSLATION; word times approximate]"
     if v.meta.get("transcript_dropped"):
         lang += f" [{v.meta['transcript_dropped']:.0f}s of unusable ASR dropped]"
+    if v.meta.get("transcript_recovered"):
+        lang += f" [{v.meta['transcript_recovered']:.1f}s of merged speech recovered]"
+    if v.meta.get("transcript_unclear"):
+        lang += f" [{v.meta['transcript_unclear']:.1f}s unclear: query('{v.id}', 'unclear')]"
     speech = sum(w.end - w.start for w in words)
     sil = sum(e.end - e.start for e in ev if e.kind == "silence")
     counts = {k: sum(e.kind == k for e in ev) for k in ("silence", "loud", "black", "freeze")}

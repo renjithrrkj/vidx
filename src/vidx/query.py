@@ -173,7 +173,7 @@ def overview(video_id: str, level: str = "scenes", limit: int = config.DEFAULT_L
 
 # ---------------------------------------------------------------- query
 
-EVENT_RE = re.compile(r"^\s*(silence|loud|black|freeze|laugh|beat|glitch|speech|music|sfx)\s*(?:([<>]=?)\s*([\d.]+)\s*s?)?\s*$", re.I)
+EVENT_RE = re.compile(r"^\s*(silence|loud|black|freeze|laugh|beat|glitch|speech|music|sfx|unclear)\s*(?:([<>]=?)\s*([\d.]+)\s*s?)?\s*$", re.I)
 
 
 def _norm(s: str) -> str:

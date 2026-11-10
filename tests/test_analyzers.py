@@ -1,8 +1,11 @@
+import wave
+
 import numpy as np
 
 from vidx.analyzers.audio import active_area, dominant_crop, parse_detect_log
 from vidx.analyzers.laugh import to_events
 from vidx.analyzers.transcript import choose_task, degenerate
+from vidx.store import Word
 
 
 def test_laugh_windows_merge_into_one_event():
@@ -143,6 +146,218 @@ def test_glitch_needs_sustained_spike_above_shot_baseline():
     r3 = r.copy()
     r3[30] = 30  # one frame is noise
     assert find_suspect(r3) is None
+
+
+def test_suspect_spans_finds_wordless_speech_but_not_silence_or_normal_pause():
+    from vidx.analyzers.transcript import suspect_spans
+
+    hop = 0.1
+    words = [Word(0.0, 1.0, "hi"), Word(1.8, 2.4, "there"), Word(7.0, 7.5, "ok")]
+    duration = 7.5  # ends exactly at the last word: no trailing tail gap to confuse the cases below
+
+    # the 2.4 -> 7.0 gap (4.6s) is VAD-speech: a merged false-start + retake
+    speech_gap = np.zeros(int(duration / hop), bool)
+    speech_gap[int(2.4 / hop): int(7.0 / hop)] = True
+    assert suspect_spans(words, speech_gap, hop, duration) == [(2.4, 7.0)]
+
+    real_silence = np.zeros(int(duration / hop), bool)
+    assert suspect_spans(words, real_silence, hop, duration) == []  # same gap, but VAD hears nothing
+
+    close_words = [Word(0.0, 1.0, "hi"), Word(1.6, 2.2, "there")]
+    pause_speech = np.ones(int(2.2 / hop), bool)
+    assert suspect_spans(close_words, pause_speech, hop, 2.2) == []  # a normal 0.6s pause, not 1.5s+
+
+
+def test_suspect_spans_ignores_loud_non_speech_like_music_in_a_pause():
+    from vidx.analyzers.transcript import suspect_spans
+
+    hop = 0.1
+    words = [Word(0.0, 1.0, "hi"), Word(7.0, 7.5, "ok")]
+    duration = 7.5
+
+    # the 1.0 -> 7.0 gap is plenty loud (e.g. underscore music or room tone) but VAD never calls it
+    # speech: energy alone can't tell this apart from a missed retake, VAD can.
+    not_speech = np.zeros(int(duration / hop), bool)
+    assert suspect_spans(words, not_speech, hop, duration) == []
+
+
+def test_suspect_spans_flags_implausibly_long_word():
+    from vidx.analyzers.transcript import suspect_spans
+
+    hop, duration = 0.1, 6.6
+    speech = np.ones(int(duration / hop), bool)
+    # "there" stretched across a false-start + retake: 6s for a 5-letter word
+    words = [Word(0.0, 0.4, "hi"), Word(0.6, 6.6, "there")]
+    assert suspect_spans(words, speech, hop, duration) == [(0.6, 6.6)]
+
+    normal = [Word(0.0, 0.4, "hi"), Word(0.6, 1.4, "wonderful")]  # a long word, plausibly spoken
+    assert suspect_spans(normal, speech, hop, 1.4) == []
+
+
+def test_recover_suspect_spans_merges_without_duplicates_and_keeps_order():
+    from vidx.analyzers.transcript import recover_suspect_spans
+
+    class StubReader:
+        duration = 10.0
+
+        def seconds(self, a, b):
+            return np.zeros(1)
+
+    words = [Word(0.0, 0.5, "hello"), Word(0.5, 1.0, "world"), Word(1.0, 7.0, "bridge"), Word(7.2, 7.6, "end")]
+
+    def stub_transcribe(audio):
+        # span-relative times (pa = 1.0 - pad = 0.7): together these cover the whole 1.0-7.0 span,
+        # and "end" lands on audio already covered by the existing word at 7.2-7.6, so it must not
+        # be duplicated
+        return [Word(0.3, 3.0, "take"), Word(3.0, 6.3, "two"), Word(6.6, 7.0, "end")]
+
+    new_words, unclear, recovered_s, unclear_s = recover_suspect_spans(
+        StubReader(), words, [(1.0, 7.0)], stub_transcribe, pad=0.3)
+    assert [w.text for w in new_words] == ["hello", "world", "take", "two", "end"]
+    assert [w.start for w in new_words] == sorted(w.start for w in new_words)
+    assert recovered_s == 6.0 and unclear_s == 0.0
+    assert unclear == []
+
+
+def test_recover_suspect_spans_counts_only_the_covered_sliver_as_recovered():
+    from vidx.analyzers.transcript import recover_suspect_spans
+
+    class StubReader:
+        duration = 20.0
+
+        def seconds(self, a, b):
+            return np.zeros(1)
+
+    words = [Word(0.0, 1.0, "hi")]
+    # a 10s suspect span; the retry only recovers 0.5s near the start, the rest stays wordless
+    new_words, unclear, recovered_s, unclear_s = recover_suspect_spans(
+        StubReader(), words, [(2.0, 12.0)], lambda audio: [Word(0.0, 0.5, "um")], pad=0.0)
+    assert recovered_s == 0.5 and unclear_s == 9.5
+    assert [(e.start, e.end) for e in unclear] == [(2.5, 12.0)]
+
+
+def test_wordless_span_without_recovery_becomes_unclear_event():
+    from vidx.analyzers.transcript import recover_suspect_spans
+
+    class StubReader:
+        duration = 10.0
+
+        def seconds(self, a, b):
+            return np.zeros(1)
+
+    words = [Word(0.0, 1.0, "hi")]
+    new_words, unclear, recovered_s, unclear_s = recover_suspect_spans(
+        StubReader(), words, [(2.0, 5.0)], lambda audio: [])
+    assert new_words == words  # nothing to replace, nothing recovered
+    assert [e.kind for e in unclear] == ["unclear"]
+    assert (unclear[0].start, unclear[0].end) == (2.0, 5.0)
+    assert recovered_s == 0.0 and unclear_s == 3.0
+
+
+class _FakeWord:
+    def __init__(self, word, start, end):
+        self.word, self.start, self.end = word, start, end
+
+
+class _FakeSeg:
+    def __init__(self, words, text="ok", compression_ratio=1.0):
+        self.text, self.compression_ratio, self.words = text, compression_ratio, words
+
+
+class _FakeModel:
+    """Stands in for faster-whisper's WhisperModel: pops the next queued segment list on each
+    .transcribe() call, in the order Transcript.run() makes them (main pass, then each retry)."""
+
+    def __init__(self, calls):
+        self._calls = list(calls)
+
+    def transcribe(self, audio, **kw):
+        return self._calls.pop(0), None
+
+
+def _write_silence_wav(path, seconds, sr=16000):
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(b"\x00\x00" * int(seconds * sr))
+
+
+def _test_video(tmp_path, duration):
+    from vidx import store
+    from vidx.store import VideoInfo
+
+    wav = tmp_path / "audio16k.wav"
+    _write_silence_wav(wav, duration)
+    v = VideoInfo(id="v1", path=str(tmp_path / "clip.mp4"), sha1="x", duration=duration,
+                  fps=30.0, width=640, height=360, meta={})
+    store.put_video(v)
+    return v, wav
+
+
+def _patch_store(tmp_path, monkeypatch):
+    from vidx import config, store
+
+    monkeypatch.setattr(config, "HOME", tmp_path)
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "vidx.db")
+    monkeypatch.setattr(store, "_conn", None)
+    monkeypatch.setattr(config, "WHISPER_LANGUAGE", "en")  # skip detect_language in the stub model
+
+
+def test_transcript_run_with_no_suspect_spans_indexes_exactly_as_before(tmp_path, monkeypatch):
+    from vidx import store
+    from vidx.analyzers import Context
+    from vidx.analyzers.transcript import Transcript
+
+    _patch_store(tmp_path, monkeypatch)
+    video, wav = _test_video(tmp_path, 5.0)
+    # five words, back to back with only short (<1.5s) pauses: nothing here is suspect
+    words = [_FakeWord("hi", 0.0, 1.0), _FakeWord("there", 1.2, 2.2), _FakeWord("friend", 2.4, 3.4),
+             _FakeWord("today", 3.6, 4.6), _FakeWord("ok", 4.6, 5.0)]
+    model = _FakeModel([[_FakeSeg(words)]])
+    monkeypatch.setattr("vidx.analyzers.transcript.load_whisper", lambda name: model)
+
+    def _no_vad(*a, **kw):
+        raise AssertionError("speech_profile (the VAD pass) must not run with no candidate gap")
+    monkeypatch.setattr("vidx.analyzers.transcript.speech_profile", _no_vad)
+
+    ctx = Context()
+    ctx.audio16k = lambda v: wav
+    result = Transcript().run(video, ctx)
+
+    assert result.info["words"] == 5
+    assert "recovered_s" not in result.info and "unclear_s" not in result.info
+    stored = store.get_video(video.id)
+    assert "transcript_recovered" not in stored.meta and "transcript_unclear" not in stored.meta
+    assert store.get_events(video.id, "unclear") == []
+
+
+def test_transcript_run_recovers_partial_speech_and_records_remaining_unclear(tmp_path, monkeypatch):
+    from vidx import store
+    from vidx.analyzers import Context
+    from vidx.analyzers.transcript import Transcript
+
+    _patch_store(tmp_path, monkeypatch)
+    video, wav = _test_video(tmp_path, 10.0)
+    # "hi" .. 7.5s wordless speech-like gap .. "ok": a merged false-start + retake
+    first_pass = [_FakeSeg([_FakeWord("hi", 0.0, 1.0), _FakeWord("ok", 8.5, 8.9)])]
+    # span-relative words (pad=0.3 -> absolute 1.0-4.0); only the first part of the gap recovers
+    second_pass = [_FakeSeg([_FakeWord("retake", 0.3, 3.3)])]
+    model = _FakeModel([first_pass, second_pass])
+    monkeypatch.setattr("vidx.analyzers.transcript.load_whisper", lambda name: model)
+    monkeypatch.setattr("vidx.analyzers.transcript.speech_profile",
+                         lambda reader, hop=0.1: np.ones(int(reader.duration / hop) + 2, bool))
+
+    ctx = Context()
+    ctx.audio16k = lambda v: wav
+    result = Transcript().run(video, ctx)
+
+    assert result.info["recovered_s"] == 3.0 and result.info["unclear_s"] == 4.5
+    stored = store.get_video(video.id)
+    assert stored.meta["transcript_recovered"] == 3.0 and stored.meta["transcript_unclear"] == 4.5
+    unclear = store.get_events(video.id, "unclear")
+    assert len(unclear) == 1 and (unclear[0].start, unclear[0].end) == (4.0, 8.5)
+    assert [w.text for w in store.get_words(video.id)] == ["hi", "retake", "ok"]
 
 
 def test_audio_labels_and_beats():
