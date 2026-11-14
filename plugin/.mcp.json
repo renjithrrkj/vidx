@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vidx": {
+      "command": "uvx",
+      "args": ["--python", "3.12", "--from", "vidx==0.2.0", "vidx-mcp"]
+    }
+  }
+}
