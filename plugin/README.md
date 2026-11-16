@@ -28,6 +28,10 @@ check, diff) and a skill that tells Claude how to use them in the right order.
 - About 2 GB of free disk space. Tested on Apple-silicon Macs with 8 GB of memory. Linux should work.
   Windows has not been tested.
 
+The first start downloads vidx's dependencies, which can take about a minute. If Claude Code reports
+that the vidx server failed to start the first time, restart Claude Code or run `/mcp` and reconnect it.
+Later starts take a few seconds.
+
 ## What it runs and downloads
 
 - The plugin starts the server with `uvx --python 3.12 --from vidx==0.2.0 vidx-mcp`, which installs the
