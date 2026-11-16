@@ -132,3 +132,16 @@ Choices made where the spec left room, or where reality differed from it.
   `uvx --from ${CLAUDE_PLUGIN_ROOT}/vendor/<wheel>`. The directory prefers this to a git commit pin.
 - Every release must copy the new wheel into `plugin/vendor/`, delete the old one, and update `.mcp.json` and the
   version in `plugin.json`.
+
+## 0.2.1: idle unloading, marketplace, MCP Registry
+
+- The directory refused the plugin: only Verified organizations may ship local servers or code, and nobody can apply
+  yet. The repo is now its own plugin marketplace (`.claude-plugin/marketplace.json` at the root, the plugin stays in
+  `plugin/`), and `server.json` lists vidx in the MCP Registry. Resubmit to the directory once verification opens.
+- The registry starts a PyPI package as `uvx <name> <args>`, which runs the `vidx` CLI, so `vidx mcp` starts the
+  server. `vidx-mcp` still works.
+- A server no longer holds the speech and vision models (about 850 MB) for the life of a session. After
+  `VIDX_IDLE_UNLOAD_S` (600) seconds with no tool running, it drops them and they reload on the next call that needs
+  them. It unloads rather than exits, because Claude Code doesn't restart a server that quits, so the session would
+  lose its tools.
+- The server reports its package version (`dev` from an uninstalled checkout).

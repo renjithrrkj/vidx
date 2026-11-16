@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.renjithrrkj/vidx",
+  "title": "vidx",
+  "description": "Local video understanding and editing for agents, in small text instead of frames.",
+  "repository": { "url": "https://github.com/renjithrrkj/vidx", "source": "github" },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "vidx",
+      "version": "0.2.1",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "mcp" }]
+    }
+  ]
+}

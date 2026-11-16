@@ -40,9 +40,19 @@ Sounds: drone_01-06, impact_01-06, riser_01-05, whoosh_01-03.
 Render presets: original, reel_9x16 (1080x1920, -16 LUFS, <=90s), yt_16x9 (1920x1080, -14 LUFS).
 Renders land in vidx_renders/ next to the source unless out_path is given."""
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: E402
+
 from mcp.types import ToolAnnotations  # noqa: E402
 
-mcp = MCPServer("vidx", instructions=INSTRUCTIONS)
+from vidx import idle  # noqa: E402
+
+try:
+    _VERSION = _pkg_version("vidx")
+except PackageNotFoundError:  # running from a source checkout that isn't installed
+    _VERSION = "dev"
+
+mcp = MCPServer("vidx", instructions=INSTRUCTIONS, version=_VERSION)
+_idle = idle.Tracker()
 
 
 def _errors(fn):
@@ -60,7 +70,8 @@ def _errors(fn):
 
 async def _run(fn, *a, **kw):
     # analyzers / ffmpeg are blocking; keep the event loop free
-    return await asyncio.to_thread(fn, *a, **kw)
+    with _idle.busy():
+        return await asyncio.to_thread(fn, *a, **kw)
 
 
 @mcp.tool(title="Index a video", annotations=ToolAnnotations(title="Index a video", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
@@ -151,6 +162,7 @@ async def diff(version_a: str, version_b: str) -> str:
 
 def main() -> None:
     print("vidx MCP server on stdio", file=sys.stderr)
+    _idle.start()
     mcp.run("stdio")
 
 
