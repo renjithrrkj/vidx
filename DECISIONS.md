@@ -124,3 +124,11 @@ Choices made where the spec left room, or where reality differed from it.
 - Not done: video overlays (picture-in-picture), exit animations for layers, and exporting layers to OTIO (the render has
   them; the .otio file only notes how many).
 
+
+## Plugin ships its own wheel (0.2.0)
+
+- The Claude directory doesn't count `vidx==0.2.0` from PyPI as a pin, because files can be added to a published
+  release. The plugin ships the exact wheel in `plugin/vendor/` and starts it with
+  `uvx --from ${CLAUDE_PLUGIN_ROOT}/vendor/<wheel>`. The directory prefers this to a git commit pin.
+- Every release must copy the new wheel into `plugin/vendor/`, delete the old one, and update `.mcp.json` and the
+  version in `plugin.json`.
