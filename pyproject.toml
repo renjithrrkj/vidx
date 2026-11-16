@@ -1,6 +1,6 @@
 [project]
 name = "vidx"
-version = "0.1.0"
+version = "0.2.0"
 description = "Token-efficient video understanding + editing for LLM agents"
 readme = "README.md"
 license = "MIT"

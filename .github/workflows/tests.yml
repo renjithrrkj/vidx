@@ -8,7 +8,7 @@ on:
 jobs:
   unit:
     # DSL, segment math, snap/pad, diff, checks and analyzer logic: no video, no models.
-    # Lightweight deps only, so CI doesn't download PyTorch on every push.
+    # Lightweight deps only (plus the MCP library, to check tool labels), so CI doesn't download PyTorch.
     strategy:
       fail-fast: false
       matrix:
@@ -21,4 +21,4 @@ jobs:
       - name: Unit tests
         env:
           PYTHONPATH: src
-        run: uv run --no-project --python ${{ matrix.python }} --with numpy --with pillow --with opencv-python-headless --with pytest pytest -q -m "not slow"
+        run: uv run --no-project --python ${{ matrix.python }} --with numpy --with pillow --with opencv-python-headless --with "mcp>=2.0" --with pytest pytest -q -m "not slow"

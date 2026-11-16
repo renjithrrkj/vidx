@@ -40,6 +40,8 @@ Sounds: drone_01-06, impact_01-06, riser_01-05, whoosh_01-03.
 Render presets: original, reel_9x16 (1080x1920, -16 LUFS, <=90s), yt_16x9 (1920x1080, -14 LUFS).
 Renders land in vidx_renders/ next to the source unless out_path is given."""
 
+from mcp.types import ToolAnnotations  # noqa: E402
+
 mcp = MCPServer("vidx", instructions=INSTRUCTIONS)
 
 
@@ -61,7 +63,7 @@ async def _run(fn, *a, **kw):
     return await asyncio.to_thread(fn, *a, **kw)
 
 
-@mcp.tool()
+@mcp.tool(title="Index a video", annotations=ToolAnnotations(title="Index a video", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 @_errors
 async def index_video(path: str, force: bool = False, captions: bool = False, glitch: bool = False) -> str:
     """Index a video file: neural shot cuts, keyframes, motion and colour per shot, on-screen text and
@@ -72,7 +74,7 @@ async def index_video(path: str, force: bool = False, captions: bool = False, gl
     return await _run(api.index_video, path, force, captions, glitch)
 
 
-@mcp.tool()
+@mcp.tool(title="Video overview", annotations=ToolAnnotations(title="Video overview", readOnlyHint=True, openWorldHint=False))
 @_errors
 async def overview(video_id: str, level: str = "scenes", limit: int = 20, offset: int = 0) -> str:
     """Table of contents. level="scenes" covers the whole video in <=limit lines (similar shots merged,
@@ -80,7 +82,7 @@ async def overview(video_id: str, level: str = "scenes", limit: int = 20, offset
     return await _run(api.overview, video_id, level, limit, offset)
 
 
-@mcp.tool()
+@mcp.tool(title="Find moments", annotations=ToolAnnotations(title="Find moments", readOnlyHint=True, openWorldHint=False))
 @_errors
 async def query(video_id: str, text: str, kind: str = "any", limit: int = 10) -> str:
     """Find time ranges. kind: speech (exact+fuzzy transcript match), visual (CLIP text->shot), text (on-screen
@@ -89,7 +91,7 @@ async def query(video_id: str, text: str, kind: str = "any", limit: int = 10) ->
     return await _run(api.query, video_id, text, kind, limit)
 
 
-@mcp.tool()
+@mcp.tool(title="Read a time range", annotations=ToolAnnotations(title="Read a time range", readOnlyHint=True, openWorldHint=False))
 @_errors
 async def get_segment(video_id: str, start: str, end: str = "",
                       fields: str = "words,events,shots") -> str:
@@ -99,7 +101,7 @@ async def get_segment(video_id: str, start: str, end: str = "",
     return await _run(api.get_segment, video_id, start, end or None, fields)
 
 
-@mcp.tool()
+@mcp.tool(title="Look at frames", annotations=ToolAnnotations(title="Look at frames", readOnlyHint=True, openWorldHint=False))
 async def peek(target: str, times: list[str] | None = None, size: int = 384, grid: bool = True) -> list:
     """SEE frames (costs image tokens; use sparingly). target = video_id or a rendered version id (v3).
     times = seconds or shot ids, e.g. ["12.5", "s3"]; omit for an even visual summary. Returns one
@@ -113,7 +115,7 @@ async def peek(target: str, times: list[str] | None = None, size: int = 384, gri
     return [cap] + [Image(data=b, format="jpeg") for b in imgs]
 
 
-@mcp.tool()
+@mcp.tool(title="Create an edit version", annotations=ToolAnnotations(title="Create an edit version", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 @_errors
 async def edit(video_id: str, dsl: str, parent_version: str = "") -> str:
     """Create a version from an edit script (see server instructions for the DSL). With parent_version,
@@ -122,7 +124,7 @@ async def edit(video_id: str, dsl: str, parent_version: str = "") -> str:
     return await _run(api.edit, video_id, dsl, parent_version or None)
 
 
-@mcp.tool()
+@mcp.tool(title="Render a version", annotations=ToolAnnotations(title="Render a version", readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
 @_errors
 async def render(version_id: str, preset: str = "original", out_path: str = "", preview: bool = False) -> str:
     """Render a version. preset: original | reel_9x16 | yt_16x9. preview=true is a fast 480p draft.
@@ -131,7 +133,7 @@ async def render(version_id: str, preset: str = "original", out_path: str = "", 
     return await _run(api.render, version_id, preset, out_path or None, preview)
 
 
-@mcp.tool()
+@mcp.tool(title="Check a render", annotations=ToolAnnotations(title="Check a render", readOnlyHint=True, openWorldHint=False))
 @_errors
 async def check(version_id: str) -> str:
     """QA a rendered version: black frames, new freezes, mid-word cuts, audio jumps at joins, loudness vs
@@ -139,7 +141,7 @@ async def check(version_id: str) -> str:
     return await _run(api.check, version_id)
 
 
-@mcp.tool()
+@mcp.tool(title="Compare two versions", annotations=ToolAnnotations(title="Compare two versions", readOnlyHint=True, openWorldHint=False))
 @_errors
 async def diff(version_a: str, version_b: str) -> str:
     """What changed between two versions: added/removed/moved source ranges, option changes,

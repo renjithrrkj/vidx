@@ -1,0 +1,11 @@
+{
+  "name": "vidx",
+  "displayName": "vidx",
+  "version": "0.2.0",
+  "description": "Video understanding for agents, in small text. vidx indexes a video on your machine and tells Claude what is said and shown, where the dead air, retakes and unclear speech are, and whether a finished edit has problems, for a few hundred tokens instead of thousands of frames.",
+  "author": { "name": "Renjith Kartha", "url": "https://github.com/renjithrrkj" },
+  "homepage": "https://github.com/renjithrrkj/vidx",
+  "repository": "https://github.com/renjithrrkj/vidx",
+  "license": "MIT",
+  "keywords": ["video", "transcript", "editing", "reels", "mcp"]
+}
