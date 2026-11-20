@@ -149,6 +149,14 @@ def diff(version_a: str, version_b: str):
     _out(api.diff, version_a, version_b)
 
 
+@app.command("mcp")
+def mcp_cmd():
+    """Start the vidx MCP server on stdio (same as `vidx-mcp`)."""
+    from . import mcp_server
+
+    mcp_server.main()
+
+
 @app.command()
 def usage(video: Optional[str] = typer.Option(None, help="only this video_id / version"), last: int = 0):
     """Token report: characters returned per tool call, totalled per video and tool (~4 chars/token)."""

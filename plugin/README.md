@@ -34,8 +34,8 @@ Later starts take a few seconds.
 
 ## What it runs and downloads
 
-- The plugin starts the server from the vidx 0.2.0 wheel it ships in `vendor/` (the same file as on PyPI,
-  sha256 `8af6bb8c…14bd`), using `uvx --python 3.12`. The first time, uv installs vidx's dependencies from PyPI.
+- The plugin starts the server from the vidx 0.2.1 wheel it ships in `vendor/` (the same file as on PyPI,
+  sha256 `31346c96…930b`), using `uvx --python 3.12`. The first time, uv installs vidx's dependencies from PyPI.
 - The first index downloads open model weights: Whisper `small` for speech (about 460 MB) and CLIP
   ViT-B-32 for visual search (about 600 MB), both from Hugging Face, cached on your machine. The
   shot-detection and OCR models are already inside their Python packages.

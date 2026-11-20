@@ -1,5 +1,7 @@
 # vidx
 
+<!-- mcp-name: io.github.renjithrrkj/vidx -->
+
 [![tests](https://github.com/renjithrrkj/vidx/actions/workflows/tests.yml/badge.svg)](https://github.com/renjithrrkj/vidx/actions/workflows/tests.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -30,8 +32,17 @@ You need [ffmpeg](https://ffmpeg.org) and [uv](https://docs.astral.sh/uv/):
 
 ```bash
 brew install ffmpeg uv          # Linux: apt install ffmpeg, then curl -LsSf https://astral.sh/uv/install.sh | sh
-claude mcp add vidx -- uvx --from git+https://github.com/renjithrrkj/vidx vidx-mcp
 ```
+
+Then install the plugin inside Claude Code. It adds the server and a skill that tells Claude how to use it:
+
+```
+/plugin marketplace add renjithrrkj/vidx
+/plugin install vidx@vidx
+```
+
+Or add just the server: `claude mcp add vidx -- uvx vidx mcp`. Other MCP clients can find vidx in the
+[MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.renjithrrkj/vidx`.
 
 No clone needed. Then ask your agent something like *"index ~/Movies/talk.mp4, cut the dead air
 and make a 9:16 reel of the part where I talk about pricing"*.
@@ -224,7 +235,8 @@ finds them instead of an agent reading them as safe to cut.
 
 `VIDX_HOME` (default `~/.vidx`), `VIDX_WHISPER_MODEL` (`small`; try `medium` for Malayalam),
 `VIDX_WHISPER_LANGUAGE` (force e.g. `ml`), `VIDX_WHISPER_TASK` (`auto`/`transcribe`/`translate`), `VIDX_DEVICE` (`cuda`/`mps`/`cpu`),
-`VIDX_ENCODER` (`libx264` or `h264_videotoolbox`), `VIDX_SHOT_THRESHOLD`, `VIDX_SILENCE_DB`.
+`VIDX_ENCODER` (`libx264` or `h264_videotoolbox`), `VIDX_SHOT_THRESHOLD`, `VIDX_SILENCE_DB`,
+`VIDX_IDLE_UNLOAD_S` (`600`: the server frees its speech and vision models after this many idle seconds; `0` keeps them loaded).
 
 ## Layout
 
