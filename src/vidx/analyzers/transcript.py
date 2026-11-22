@@ -17,7 +17,7 @@ import numpy as np
 
 from .. import config, store, util
 from ..store import Event, VideoInfo, Word
-from . import AnalyzerResult, Context
+from . import AnalyzerResult, Context, indic
 
 _models: dict[str, object] = {}
 
@@ -45,6 +45,17 @@ def script_of(text: str) -> str | None:
                 counts[name] = counts.get(name, 0) + 1
                 break
     return max(counts, key=counts.get) if counts else None
+
+
+def script_mix(words: list[Word]) -> dict[str, float] | None:
+    """Share of speaking time per script, only when there is more than one."""
+    scripts: dict[str, float] = {}
+    for w in words:
+        sc = script_of(w.text)
+        if sc:
+            scripts[sc] = scripts.get(sc, 0) + (w.end - w.start)
+    tot = sum(scripts.values()) or 1
+    return {k: round(v / tot, 2) for k, v in scripts.items()} if len(scripts) > 1 else None
 
 
 def degenerate(text: str, compression_ratio: float, lang: str | None, task: str) -> bool:
@@ -292,6 +303,9 @@ class Transcript:
             D = reader.duration
             probe = np.concatenate([reader.seconds(t, t + 60) for t in (D * 0.1, D * 0.5, D * 0.85)])
             lang, prob, _ = model.detect_language(probe, vad_filter=True, language_detection_segments=3)
+        if indic.use_for(lang):
+            _models.clear()  # free whisper before loading the larger model
+            return self._run_indic(video, reader, lang, prob)
         task = choose_task(lang, config.WHISPER_MODEL)
         words: list[Word] = []
         dropped = 0.0
@@ -331,18 +345,14 @@ class Transcript:
 
         store.put_words(video.id, words)
         _models.clear()  # ~1 GB; reloading takes seconds, holding it in a long-lived server doesn't pay
-        scripts: dict[str, float] = {}
-        for w in words:
-            sc = script_of(w.text)
-            if sc:
-                scripts[sc] = scripts.get(sc, 0) + (w.end - w.start)
-        tot = sum(scripts.values()) or 1
-        mix = {k: round(v / tot, 2) for k, v in scripts.items()} if len(scripts) > 1 else None
+        mix = script_mix(words)
         mode = "translated-en" if task == "translate" else "transcribed"
         meta = dict(language=lang, language_prob=prob, language_mix=mix,
                     transcript_mode=mode, transcript_dropped=round(dropped, 1))
         info = {"language": lang, "mode": mode, "words": len(words),
                 "dropped_s": round(dropped, 1), "model": config.WHISPER_MODEL}
+        if task == "translate" and lang in indic.LANGS:
+            info["hint"] = "English translation; run `vidx setup-indic` for a transcript in the original language"
         if spans:  # keep output unchanged on clips with nothing to recover
             meta["transcript_recovered"] = recovered_s
             meta["transcript_unclear"] = unclear_s
@@ -350,3 +360,19 @@ class Transcript:
             info["unclear_s"] = unclear_s
         store.update_meta(video.id, **meta)
         return AnalyzerResult(info=info)
+
+    def _run_indic(self, video: VideoInfo, reader, lang: str, prob) -> AnalyzerResult:
+        """IndicConformer pass: same chunking at quiet moments, shorter chunks (attention memory)."""
+        words: list[Word] = []
+        try:
+            for c0, c1 in chunk_bounds(reader, size=indic.CHUNK_S, search=indic.SEARCH_S):
+                words += [Word(round(w.start + c0, 3), round(w.end + c0, 3), w.text)
+                          for w in indic.transcribe(reader.seconds(c0, c1), lang)]
+        finally:
+            indic.unload()  # ~2.6 GB; never hold it in a long-lived server
+        store.put_events(video.id, ["unclear"], [])
+        store.put_words(video.id, words)
+        store.update_meta(video.id, language=lang, language_prob=prob, language_mix=script_mix(words),
+                          transcript_mode="transcribed", transcript_dropped=0.0)
+        return AnalyzerResult(info={"language": lang, "mode": "transcribed", "words": len(words),
+                                    "dropped_s": 0.0, "model": indic.NAME})
