@@ -89,6 +89,9 @@ def test_malayalam_without_indic_still_translates_and_says_how_to_fix(tmp_path, 
     model = _FakeModel([[_FakeSeg([_FakeWord("offer", 0.5, 1.0)])]])
     monkeypatch.setattr("vidx.analyzers.transcript.load_whisper", lambda name: model)
     monkeypatch.setattr(indic, "available", lambda: False)
+    # the 4 s pause after the word would trigger the VAD pass (faster-whisper, absent in CI): no speech there
+    monkeypatch.setattr("vidx.analyzers.transcript.speech_profile",
+                        lambda reader, hop=0.1: np.zeros(int(reader.duration / hop) + 2, bool))
 
     ctx = Context()
     ctx.audio16k = lambda v: wav
