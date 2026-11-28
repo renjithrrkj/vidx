@@ -145,3 +145,20 @@ Choices made where the spec left room, or where reality differed from it.
   them. It unloads rather than exits, because Claude Code doesn't restart a server that quits, so the session would
   lose its tools.
 - The server reports its package version (`dev` from an uninstalled checkout).
+
+## IndicConformer for Indian languages
+
+- Whisper small writes broken Malayalam, so vidx translated it to English. On a 12 s Malayalam test clip the translation
+  turned "offer" into "friend" and "booked it" into "didn't book it", so cuts chosen from it land on the wrong words.
+  AI4Bharat's IndicConformer 600M (MIT) got the meaning right in Malayalam script. CTC decoding beat RNNT there: RNNT
+  dropped the first 2-3 seconds. Word times from CTC tokens matched the audio's loudness to within about 0.1-0.2 s.
+- It is optional (`vidx setup-indic`, about 2.4 GB, gated on Hugging Face), pinned to one revision, and used
+  automatically when the detected language is one of its 22. Whisper still detects the language first.
+- vidx runs the ONNX and TorchScript files itself instead of the repo's Python, so no remote code runs and transformers
+  isn't required. The files are copied out of the Hugging Face cache, because onnxruntime 1.31 refuses external
+  weights reached through the cache's symlinks.
+- It peaks near 2.6 GB on an 8 GB machine, so audio goes in 30 s chunks cut at quiet moments, Whisper is freed before
+  it loads, and it is unloaded as soon as the transcript is written. Near-silent audio (below -60 dBFS) is skipped:
+  CTC emits a stray letter on digital silence.
+- The Whisper-only retake recovery pass doesn't run on this path yet. Measure the error rate on a longer clip with a
+  corrected reference before tuning anything.

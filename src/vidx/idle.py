@@ -16,12 +16,13 @@ IDLE_UNLOAD_S = float(os.environ.get("VIDX_IDLE_UNLOAD_S", "600"))  # 0 turns it
 
 def unload_models() -> bool:
     """Drop the cached whisper and CLIP models. Returns True if anything was loaded."""
-    from vidx.analyzers import transcript, visual
+    from vidx.analyzers import indic, transcript, visual
 
-    had = bool(transcript._models) or visual._model is not None
+    had = bool(transcript._models) or visual._model is not None or indic._model is not None
     with visual._lock:
         visual._model = None
     transcript._models.clear()
+    indic.unload()
     if had:
         gc.collect()
     return had

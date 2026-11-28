@@ -149,6 +149,15 @@ def diff(version_a: str, version_b: str):
     _out(api.diff, version_a, version_b)
 
 
+@app.command("setup-indic")
+def setup_indic():
+    """Download IndicConformer (about 2.4 GB) for transcripts in Malayalam and 21 other Indian languages.
+    It is gated: accept its terms at huggingface.co/ai4bharat/indic-conformer-600m-multilingual and run
+    `hf auth login` first."""
+    from .analyzers import indic
+    print(f"installed to {indic.install()}")
+
+
 @app.command("mcp")
 def mcp_cmd():
     """Start the vidx MCP server on stdio (same as `vidx-mcp`)."""

@@ -222,8 +222,11 @@ A whole session on the 10-min video (23 calls: overviews, queries, segments, edi
 returned ~9.4k chars, roughly 2.3k tokens of text. Rendering the 9:41 silence-cut at 1080×1920
 takes ~3 min, a 54 s reel ~10 s.
 
-Malayalam and other languages that Whisper-small transcribes badly are indexed as an **English
-translation** (flagged in the summary). Set `VIDX_WHISPER_MODEL=large-v3` for native-script transcripts.
+Malayalam and 21 other Indian languages are transcribed in their own script by AI4Bharat's
+IndicConformer (MIT, about 2.4 GB) once you install it. The model is gated: accept its terms at
+huggingface.co/ai4bharat/indic-conformer-600m-multilingual, run `hf auth login`, then `vidx setup-indic`.
+Without it, these languages are indexed as an **English translation** (flagged in the summary), which can
+change the meaning.
 
 A false start followed by a retake can get merged by whisper into one segment, leaving several seconds
 of real speech with no words and one word stretched across the gap. vidx re-transcribes stretches like
@@ -236,6 +239,7 @@ finds them instead of an agent reading them as safe to cut.
 `VIDX_HOME` (default `~/.vidx`), `VIDX_WHISPER_MODEL` (`small`; try `medium` for Malayalam),
 `VIDX_WHISPER_LANGUAGE` (force e.g. `ml`), `VIDX_WHISPER_TASK` (`auto`/`transcribe`/`translate`), `VIDX_DEVICE` (`cuda`/`mps`/`cpu`),
 `VIDX_ENCODER` (`libx264` or `h264_videotoolbox`), `VIDX_SHOT_THRESHOLD`, `VIDX_SILENCE_DB`,
+`VIDX_INDIC` (`auto`; `0` keeps Whisper for Indian languages), `VIDX_INDIC_DIR` (where `setup-indic` puts the model),
 `VIDX_IDLE_UNLOAD_S` (`600`: the server frees its speech and vision models after this many idle seconds; `0` keeps them loaded).
 
 ## Layout
